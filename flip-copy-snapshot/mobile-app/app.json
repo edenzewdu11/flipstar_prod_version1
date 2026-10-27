@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "FlipStar",
+    "slug": "flipstar-mobile",
+    "version": "1.0.0",
+    "newArchEnabled": false,
+    "plugins": [
+      "expo-secure-store",
+      "expo-video",
+      "expo-asset",
+      "expo-font"
+    ],
+    "android": {
+      "package": "com.flipstar.mobile"
+    },
+    "ios": {
+      "bundleIdentifier": "com.flipstar.mobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "83bf6e4f-df2b-41c5-809d-2c8004cacf1a"
+      }
+    },
+    "owner": "ashineeshetu"
+  }
+}
