@@ -412,6 +412,20 @@ const api = {
       }
 
       if (!response.ok) {
+        // Transparent fallback for /reels/:id/save/ if backend requires reel ownership (403)
+        const reelSaveMatch = endpoint.match(/^\/reels\/(\d+)\/save\/?$/);
+        if (response.status === 403 && reelSaveMatch && (options.method || 'GET').toUpperCase() === 'POST') {
+          const reelId = parseInt(reelSaveMatch[1], 10);
+          try {
+            return await this.request('/saved/toggle/', {
+              method: 'POST',
+              body: JSON.stringify({ reel_id: reelId }),
+            });
+          } catch (toggleErr) {
+            // If fallback also fails, proceed to standard error handling
+          }
+        }
+
         // NOTE: We intentionally do NOT clear stored credentials or retry
         // without auth on a 401. A transient 401 (server hiccup, race
         // condition on a background request) does not mean the token is
@@ -421,8 +435,8 @@ const api = {
         if (response.status === 401) {
           console.error('🔒 401 Unauthorized - authentication required');
         }
-        const silentEndpoints = ['/notifications/me/', '/profile/get_privacy/', '/profile/update_privacy/', '/blocks/', '/gamification/login-bonus/', '/privacy/consents/', '/privacy/consents/history/', '/privacy/consents/update/', '/privacy/policy/summary/', '/privacy/eu-rights/', '/auth/verify-telebirr-subscription-otp/'];
-        const isSilent = silentEndpoints.some(e => endpoint.includes(e));
+        const silentEndpoints = ['/notifications/me/', '/profile/get_privacy/', '/profile/update_privacy/', '/blocks/', '/gamification/login-bonus/', '/privacy/consents/', '/privacy/consents/history/', '/privacy/consents/update/', '/privacy/policy/summary/', '/privacy/eu-rights/', '/auth/verify-telebirr-subscription-otp/', '/subscription/telebirr/ussd/initiate/', '/direct-debit/one-off-subscription/', '/gift-purchases/'];
+        const isSilent = Boolean(options.silent) || silentEndpoints.some(e => endpoint.includes(e));
 
         if (!isSilent) {
           console.error(`API Error [${endpoint}]:`, response.status, data);
@@ -446,7 +460,7 @@ const api = {
         if (_inflight.get(inflightKey) === resultPromise) {
           _inflight.delete(inflightKey);
         }
-      });
+      }).catch(() => {});
     }
     return resultPromise;
   },
@@ -463,7 +477,9 @@ const api = {
         setCache(endpoint, fresh);
         if (onUpdate) onUpdate(fresh);
       })
-      .catch(() => { });
+      .catch(err => {
+        console.warn(`[api.requestStale] Error for ${endpoint}:`, err);
+      });
     return cached; // may be null on first load
   },
 
@@ -1272,9 +1288,49 @@ const api = {
   getDailySpin: () => api.request('/gamification/daily-spin/'),
   performSpin: () => api.request('/gamification/perform-spin/', { method: 'POST' }),
 
-  // Wallet
+  // ─── Gifts & Purchases (Postman Collection) ───────────────────────────────
+  getGifts: () => api.request('/gifts/'),
+  getGiftsByCategory: () => api.request('/gifts/by-category/'),
+  getGiftQuote: (data) =>
+    api.request('/gift-purchases/quote/', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendVirtualGift: (data) =>
+    api.request('/gifts/send/', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  createGiftPurchase: (data) =>
+    api.request('/gift-purchases/', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  getGiftPurchaseStatus: (reference) =>
+    api.request(`/gift-purchases/${encodeURIComponent(reference)}/`),
+  cancelGiftPurchase: (reference) =>
+    api.request(`/gift-purchases/${encodeURIComponent(reference)}/cancel/`, {
+      method: 'POST',
+      body: JSON.stringify({ reference }),
+    }),
+  getMyGiftPurchases: (params = '') =>
+    api.request(`/gift-purchases/${params ? `?${params}` : ''}`),
+
+  // ─── Wallet & Transactions ────────────────────────────────────────────────
   getWalletBalance: () => api.request('/wallet/'),
   getWalletConfig: () => api.request('/wallet/config/'),
+  getWalletTransactions: (type = '', page = 1, pageSize = 20) => {
+    const q = [
+      type ? `type=${encodeURIComponent(type)}` : '',
+      `page=${page}`,
+      `page_size=${pageSize}`,
+    ].filter(Boolean).join('&');
+    return api.request(`/wallet/transactions/?${q}`, { skipCache: true });
+  },
+  getGiftSentTransactions: (page = 1, pageSize = 20) =>
+    api.request(`/wallet/transactions/?type=gift_sent&page=${page}&page_size=${pageSize}`, { skipCache: true }),
+  getGiftReceivedTransactions: (page = 1, pageSize = 20) =>
+    api.request(`/wallet/transactions/?type=gift_received&page=${page}&page_size=${pageSize}`, { skipCache: true }),
   getCoinPackages: () => api.request('/coins/packages/'),
   appleVerifyCoinPurchase: (packageId, receiptData, productId) =>
     api.request('/wallet/apple/verify-purchase/', {
@@ -1344,14 +1400,121 @@ const api = {
   },
 
   initiateTelebirrUssdPush: async (tierId, phoneNumber, verificationSessionId) => {
+    let rawPhone = String(phoneNumber || '').trim().replace(/\D/g, '');
+    let msisdn = rawPhone;
+    if (rawPhone.length >= 9) {
+      msisdn = '251' + rawPhone.slice(-9);
+    }
+
+    // Attempt 1: Direct Debit one-off subscription from Postman Collection line 7940
+    // POST /api/v1/direct-debit/one-off-subscription/
+    try {
+      console.log('📱 [TELEBIRR SUB REQ -> /direct-debit/one-off-subscription/]:', tierId, msisdn);
+      const ddRes = await api.request('/direct-debit/one-off-subscription/', {
+        method: 'POST',
+        body: JSON.stringify({
+          tier_id: tierId,
+          payer_msisdn: msisdn,
+        }),
+      });
+      console.log('📱 [TELEBIRR SUB RES <- /direct-debit/one-off-subscription/]:', JSON.stringify(ddRes));
+      if (ddRes && (ddRes.success || ddRes.mandate_id || ddRes.originator_conversation_id)) {
+        return ddRes;
+      }
+    } catch (ddErr) {
+      console.warn('📱 [/direct-debit/one-off-subscription/ FAILED]:', ddErr?.status, ddErr?.message);
+      // If 409 or payment already pending on direct debit, return as pending
+      const isPending =
+        ddErr?.status === 409 ||
+        ddErr?.data?.code === 'PAYMENT_PENDING' ||
+        ddErr?.message?.includes('still being confirmed') ||
+        ddErr?.data?.error?.includes('still being confirmed');
+      if (isPending) {
+        return {
+          success: true,
+          is_pending: true,
+          code: 'PAYMENT_PENDING',
+          message: ddErr?.data?.error || 'Your previous payment is still being confirmed. Please wait a moment before trying again.',
+          mandate_id: ddErr?.data?.mandate_id || null,
+        };
+      }
+    }
+
+    // Attempt 2: Subscriptions subscribe from Postman Collection line 11833
+    // POST /api/v1/subscriptions/subscribe/
+    try {
+      console.log('🔄 Trying POST /subscriptions/subscribe/');
+      const subRes = await api.request('/subscriptions/subscribe/', {
+        method: 'POST',
+        body: JSON.stringify({
+          tier_id: tierId,
+          payment_method: 'telebirr',
+        }),
+      });
+      console.log('📱 [SUB SUBSCRIBE RES]:', JSON.stringify(subRes));
+      if (subRes && (subRes.status === 'success' || subRes.success || subRes.status === 'pending' || subRes.raw_request)) {
+        return subRes;
+      }
+    } catch (subErr) {
+      console.warn('📱 [/subscriptions/subscribe/ FAILED]:', subErr?.status, subErr?.message);
+    }
+
+    // Attempt 3: USSD Push subscription endpoint from Postman Collection line 11509
+    // POST /api/v1/subscription/telebirr/ussd/initiate/
     const payload = {
       tier_id: tierId,
-      phone_number: phoneNumber,
+      phone_number: msisdn,
+      payer_msisdn: msisdn,
       ...(verificationSessionId ? { verification_session_id: verificationSessionId } : {}),
     };
-    return await api.request('/api/v1/subscription/telebirr/ussd/initiate/', {
+
+    try {
+      console.log('📱 [TELEBIRR USSD SUB REQ]:', JSON.stringify(payload));
+      const res = await api.request('/subscription/telebirr/ussd/initiate/', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      console.log('📱 [TELEBIRR USSD SUB RES]:', JSON.stringify(res));
+      return res;
+    } catch (err) {
+      console.warn('📱 [TELEBIRR USSD SUB FAILED]:', err?.status, err?.message, err?.data);
+
+      const isPending =
+        err?.status === 409 ||
+        err?.data?.code === 'PAYMENT_PENDING' ||
+        err?.message?.includes('still being confirmed') ||
+        err?.data?.error?.includes('still being confirmed');
+
+      if (isPending) {
+        return {
+          success: true,
+          is_pending: true,
+          code: 'PAYMENT_PENDING',
+          message: err?.data?.error || 'Your previous payment is still being confirmed. Please wait a moment before trying again.',
+          originator_conversation_id: err?.data?.originator_conversation_id || null,
+        };
+      }
+
+      throw err;
+    }
+  },
+
+  checkTelebirrUssdStatus: async (originatorConversationId) => {
+    return await api.request(`/subscription/telebirr/ussd/status/?originator_conversation_id=${encodeURIComponent(originatorConversationId)}`, {
+      skipCache: true,
+    });
+  },
+
+  checkDirectDebitStatus: async (mandateId) => {
+    return await api.request(`/direct-debit/check-status/?mandate_id=${encodeURIComponent(mandateId)}`, {
+      skipCache: true,
+    });
+  },
+
+  clearPendingMandate: async () => {
+    return await api.request('/client-log/clear-pending-mandate/', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({}),
     });
   },
 

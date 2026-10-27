@@ -46,6 +46,7 @@ export default function SubscriptionScreen({ navigation }) {
   const [telebirrPhone, settelebirrPhone] = useState('');
   const [selectedTierFortelebirr, setSelectedTierFortelebirr] = useState(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successTitle, setSuccessTitle] = useState("You're Successfully Subscribed! 🎉");
   const [successMessage, setSuccessMessage] = useState('');
   const pollRef = useRef(null);
 
@@ -116,6 +117,7 @@ export default function SubscriptionScreen({ navigation }) {
   };
 
   const mandateIdRef = useRef(null);
+  const ussdOriginatorRef = useRef(null);
 
   const startSubscriptionPolling = () => {
     if (pollRef.current) {
@@ -129,16 +131,64 @@ export default function SubscriptionScreen({ navigation }) {
     pollRef.current = setInterval(async () => {
       attempts += 1;
       try {
-        // Poll subscription status directly (matches web implementation)
+        const triggerSuccess = () => {
+          const isOndemand = selectedTierFortelebirr?.duration_type === 'ondemand' || selectedTierFortelebirr?.name?.toLowerCase()?.includes('demand');
+          setSuccessTitle(isOndemand ? 'You Bought Successfully!' : "You're Successfully Subscribed! 🎉");
+          setSuccessMessage(isOndemand ? 'You have successfully bought On Demand access!' : 'Your Telebirr subscription is now active. Enjoy all FlipStar features!');
+          setShowSuccessModal(true);
+        };
+
+        // 1. Poll user subscription directly
         const sub = await api.request('/subscriptions/', { skipCache: true });
         if (sub && sub.status === 'active') {
           clearInterval(pollRef.current);
           pollRef.current = null;
           setProcessingTierId(null);
           setCurrentSub(sub);
-          setSuccessMessage('You are successfully subscribed!');
-          setShowSuccessModal(true);
+          triggerSuccess();
           return;
+        }
+
+        // 2. Poll subscription status endpoint
+        const statusRes = await api.request('/subscription/status/', { skipCache: true });
+        if (statusRes && (statusRes.has_subscription || statusRes.status === 'active' || statusRes.subscription?.status === 'active')) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          setProcessingTierId(null);
+          if (statusRes.subscription) setCurrentSub(statusRes.subscription);
+          triggerSuccess();
+          return;
+        }
+
+        // 3. Poll Telebirr USSD status if originator ID is known
+        if (ussdOriginatorRef.current) {
+          const uStatus = await api.checkTelebirrUssdStatus(ussdOriginatorRef.current);
+          if (uStatus?.status === 'completed' || uStatus?.subscription_status === 'active') {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            setProcessingTierId(null);
+            triggerSuccess();
+            return;
+          }
+          if (uStatus?.status === 'failed') {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            setProcessingTierId(null);
+            Alert.alert('Payment Failed', 'Your Telebirr payment could not be completed. Please try again.');
+            return;
+          }
+        }
+
+        // 4. Poll Direct Debit status if mandate ID is known
+        if (mandateIdRef.current) {
+          const ddStatus = await api.checkDirectDebitStatus(mandateIdRef.current);
+          if (ddStatus?.subscription_active || ddStatus?.completed || ddStatus?.status === 'active') {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            setProcessingTierId(null);
+            triggerSuccess();
+            return;
+          }
         }
       } catch (error) {
         console.error('Subscription polling error:', error);
@@ -183,19 +233,46 @@ export default function SubscriptionScreen({ navigation }) {
     settelebirrModalVisible(false);
 
     try {
-      // Use USSD Push endpoint with verification_session_id
+      // Initiate Telebirr subscription with fallback across endpoints
       const response = await api.initiateTelebirrUssdPush(
         tier.id,
         phoneNumber,
         verificationSessionId
       );
 
-      const transactionId = response?.originator_conversation_id || response?.conversation_id || response?.id;
-      if (response && (response.success || transactionId)) {
-        Alert.alert(
-          'Telebirr Request Sent',
-          'Please enter your PIN on your phone to complete the subscription.'
-        );
+      const transactionId = response?.originator_conversation_id || response?.conversation_id || response?.id || response?.mandate_id;
+      if (response && (response.success || response.is_pending || transactionId)) {
+        if (response.originator_conversation_id) {
+          ussdOriginatorRef.current = response.originator_conversation_id;
+        }
+        if (response.mandate_id || response.id) {
+          mandateIdRef.current = response.mandate_id || response.id;
+        }
+
+        if (response.is_pending) {
+          Alert.alert(
+            'Payment Confirmation in Progress',
+            response.message || 'Your previous payment is still being confirmed. Please enter your PIN on your phone if prompted, or wait while we confirm your subscription.',
+            [
+              { text: 'Wait & Confirm', onPress: () => startSubscriptionPolling() },
+              {
+                text: 'Reset & Try Again',
+                style: 'destructive',
+                onPress: async () => {
+                  try {
+                    await api.clearPendingMandate();
+                  } catch (_) {}
+                  setProcessingTierId(null);
+                }
+              }
+            ]
+          );
+        } else {
+          Alert.alert(
+            'Telebirr Request Sent',
+            'Please enter your PIN on your phone to complete the subscription.'
+          );
+        }
         startSubscriptionPolling();
       } else {
         Alert.alert('Subscription Failed', response?.error || 'Failed to initiate USSD payment.');
@@ -203,8 +280,35 @@ export default function SubscriptionScreen({ navigation }) {
       }
     } catch (error) {
       console.error('telebirr subscription error:', error);
-      Alert.alert('Subscription Failed', error.message || 'Failed to process telebirr subscription.');
-      setProcessingTierId(null);
+      const isPending =
+        error?.status === 409 ||
+        error?.data?.code === 'PAYMENT_PENDING' ||
+        error?.message?.includes('still being confirmed') ||
+        error?.data?.error?.includes('still being confirmed');
+
+      if (isPending) {
+        Alert.alert(
+          'Payment In Progress',
+          'Your Telebirr payment is currently being confirmed. Please enter your PIN on your phone if prompted.',
+          [
+            { text: 'Wait & Confirm', onPress: () => startSubscriptionPolling() },
+            {
+              text: 'Reset & Try Again',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  await api.clearPendingMandate();
+                } catch (_) {}
+                setProcessingTierId(null);
+              }
+            }
+          ]
+        );
+        startSubscriptionPolling();
+      } else {
+        Alert.alert('Subscription Failed', error?.data?.error || error.message || 'Failed to process telebirr subscription.');
+        setProcessingTierId(null);
+      }
     }
   };
 
@@ -492,8 +596,11 @@ export default function SubscriptionScreen({ navigation }) {
       {/* Success Modal */}
       <SuccessModal
         visible={showSuccessModal}
-        onClose={() => setShowSuccessModal(false)}
-        title="Success"
+        onClose={() => {
+          setShowSuccessModal(false);
+          loadData();
+        }}
+        title={successTitle || "You're Successfully Subscribed! 🎉"}
         message={successMessage}
       />
     </View>

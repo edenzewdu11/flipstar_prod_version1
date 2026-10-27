@@ -33,9 +33,13 @@ export default function EditProfileScreen({ navigation }) {
   }, [user]);
 
   const pickPhoto = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { AppAlert.alert('Permission Required', 'Please allow photo library access.'); return; }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.8 });
+    const result = await ImagePicker.launchImageLibraryAsync({ 
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, 
+      allowsEditing: true, 
+      aspect: [1, 1], 
+      quality: 0.8,
+      selectionLimit: 1
+    });
     if (!result.canceled && result.assets?.length) setPhoto(result.assets[0].uri);
   };
 

@@ -37,6 +37,7 @@ dist/
 
 # Expo
 .expo/
+.expo-*/
 
 # Web
 web-build/

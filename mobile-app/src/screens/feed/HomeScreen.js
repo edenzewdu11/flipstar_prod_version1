@@ -4,11 +4,9 @@ import {
   ActivityIndicator, ScrollView, Dimensions, Alert, RefreshControl,
   StatusBar, Modal, TextInput, Share, KeyboardAvoidingView, Platform, Animated,
 } from 'react-native';
-import { useVideoPlayer, VideoView } from 'expo-video';
 import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBlock } from '../../contexts/BlockContext';
 import { useTheme } from '../../contexts/ThemeContext';
@@ -17,10 +15,11 @@ import config from '../../config';
 import SoundManager from '../../utils/SoundUtils';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Avatar from '../../components/common/Avatar';
-import { AppAlert } from '../../components/common/AppAlert';
+import UserSuggestions from '../../components/common/UserSuggestions';
 import HorizontalUserSuggestions from '../../components/common/HorizontalUserSuggestions';
-import HorizontalCampaignSuggestions from '../../components/campaign/HorizontalCampaignSuggestions';
 import CampaignEventEmitter from '../../contexts/CampaignEventEmitter';
+import TelebirrGiftModal from '../../components/gifts/TelebirrGiftModal';
+import SuccessModal from '../../components/common/SuccessModal';
 
 const { width, height } = Dimensions.get('window');
 const GOLD = '#8fc441';
@@ -29,9 +28,6 @@ const BG = '#0D0D0D';
 const CARD = '#1A1A1A';
 const BORDER = '#262626';
 const TABS = ['For You', 'Trending', 'Campaign', 'Leaders'];
-
-// Persists boost expiry across feed refreshes (cleared when boost actually expires)
-const boostEndTimeCache = new Map();
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -74,113 +70,105 @@ function generateThumbnailUrl(videoUrl) {
   return strategies; // Return all strategies to try
 }
 
-const VideoThumbnail = React.memo(({ thumbnailUrl, style, postMedia }) => {
+const VideoThumbnail = React.memo(({ thumbnailUrl, style, postMedia, originalImage }) => {
   const [showPlaceholder, setShowPlaceholder] = useState(false);
   const [imageSize, setImageSize] = useState({ width: null, height: null });
   
   // Debug thumbnailUrl value
-  console.log('VideoThumbnail props:', { thumbnailUrl, postMedia });
+  console.log('VideoThumbnail props:', { thumbnailUrl, postMedia, originalImage });
   
-  // Normalize thumbnail URL - handle both relative and absolute URLs
+  // Prioritize original image over thumbnail for better quality
+  const imageUrl = originalImage || thumbnailUrl;
+  
+  // Normalize thumbnail URL - handle both relative and absolute URLs  
   const thumbnailUrls = useMemo(() => {
     let urls = [];
-    if (thumbnailUrl && typeof thumbnailUrl === 'string') {
-      if (Array.isArray(thumbnailUrl)) {
-        urls = thumbnailUrl;
+    const sourceUrl = imageUrl;
+    if (sourceUrl && typeof sourceUrl === 'string') {
+      if (Array.isArray(sourceUrl)) {
+        urls = sourceUrl;
       } else {
-        urls = generateThumbnailUrl(thumbnailUrl);
+        urls = generateThumbnailUrl(sourceUrl);
         if (typeof urls === 'string') {
           urls = [urls];
         }
       }
     } else {
-      console.log('Invalid thumbnailUrl, showing placeholder:', thumbnailUrl);
+      console.log('Invalid imageUrl, showing placeholder:', sourceUrl);
       setShowPlaceholder(true);
     }
     return urls;
-  }, [thumbnailUrl]);
+  }, [imageUrl]);
   
   const normalizeUrl = useCallback((url) => {
-    if (!url || typeof url !== 'string') return null;
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file://') || url.startsWith('content://')) return url;
-    const baseUrl = config.API_BASE_URL.replace('/api', '');
-    return url.startsWith('/') ? `${baseUrl}${url}` : `${baseUrl}/${url}`;
+    if (!url || typeof url !== 'string') return url;
+    if (url.startsWith('http')) {
+      // If it's already a full URL, ensure it's requesting high quality
+      // Remove any thumbnail or quality parameters that might reduce image quality
+      const cleanUrl = url.replace(/_thumbnail/g, '').replace(/\?.*quality.*$/i, '');
+      return cleanUrl;
+    }
+    
+    // Use the full base URL without removing /api to ensure proper image quality
+    const baseUrl = config.API_BASE_URL.replace('/api/v1', '').replace('/api', '');
+    const fullUrl = url.startsWith('/') ? `${baseUrl}${url}` : `${baseUrl}/${url}`;
+    
+    // Remove any thumbnail indicators for higher quality
+    return fullUrl.replace(/_thumbnail/g, '');
   }, []);
   
   const normalizedUrl = thumbnailUrls.length > 0 ? normalizeUrl(thumbnailUrls[0]) : null;
-
-  useEffect(() => {
-    if (!normalizedUrl) return;
-    let isMounted = true;
-    Image.getSize(
-      normalizedUrl,
-      (w, h) => {
-        if (isMounted && w > 0 && h > 0) {
-          setImageSize({ width: w, height: h });
-        }
-      },
-      () => {}
-    );
-    return () => {
-      isMounted = false;
-    };
-  }, [normalizedUrl]);
   
   const handleImageError = useCallback((e) => {
     console.log('Thumbnail failed to load:', { 
-      original: thumbnailUrl, 
+      original: imageUrl, 
       normalized: normalizedUrl, 
       postMedia,
       error: e.nativeEvent 
     });
     setShowPlaceholder(true);
-  }, [thumbnailUrl, normalizedUrl, postMedia]);
+  }, [imageUrl, normalizedUrl, postMedia]);
   
   const handleImageLoad = useCallback((e) => {
-    const source = e?.nativeEvent?.source;
-    const imgWidth = source?.width;
-    const imgHeight = source?.height;
+    const { width: imgWidth, height: imgHeight } = e.nativeEvent.source;
     console.log('Image loaded with dimensions:', { imgWidth, imgHeight });
-    if (imgWidth && imgHeight) {
-      setImageSize({ width: imgWidth, height: imgHeight });
-    }
+    setImageSize({ width: imgWidth, height: imgHeight });
   }, []);
   
-  // Calculate dynamic container size based on image aspect ratio so it is never cut
+  // Calculate dynamic container size to match image aspect ratio exactly (no black bars)
   const containerStyle = useMemo(() => {
     if (imageSize.width && imageSize.height) {
-      const ratio = imageSize.width / imageSize.height;
-      const clampedRatio = Math.max(0.55, Math.min(ratio, 1.91));
+      const aspectRatio = imageSize.width / imageSize.height;
+      
       return {
         width: '100%',
-        aspectRatio: clampedRatio,
-        backgroundColor: '#0D0D0D',
+        aspectRatio: aspectRatio, // Use exact aspect ratio to eliminate black bars
+        backgroundColor: '#111',
       };
     }
     return {
       width: '100%',
-      aspectRatio: 4 / 5,
-      backgroundColor: '#0D0D0D',
+      height: 200, // Default height while loading
+      backgroundColor: '#111',
     };
   }, [imageSize]);
   
   if (showPlaceholder || !normalizedUrl) {
     return (
-      <View style={[style, { backgroundColor: CARD, justifyContent: 'center', alignItems: 'center' }]}>
-        <Ionicons name="videocam" size={64} color={GOLD} />
-        <Text style={[styles.videoPlaceholderText, { color: '#999' }]}>Video</Text>
+      <View style={[style, { backgroundColor: colors.cardBg, justifyContent: 'center', alignItems: 'center' }]}>
+        <Ionicons name="videocam" size={64} color={colors.primary} />
+        <Text style={[styles.videoPlaceholderText, { color: colors.textSecondary }]}>Video</Text>
       </View>
     );
   }
   
   return (
-    <View style={[containerStyle, style]}>
+    <View style={containerStyle}>
       <Image
         source={{ uri: normalizedUrl }}
         style={{ 
           width: '100%', 
           height: '100%',
-          backgroundColor: '#0D0D0D',
         }}
         resizeMode="contain"
         onError={handleImageError}
@@ -195,306 +183,34 @@ const VideoThumbnail = React.memo(({ thumbnailUrl, style, postMedia }) => {
   );
 });
 
-function formatBoostError(error) {
-  const rawMessage = error?.message || 'Failed to create boost. Please try again.';
-  const message = rawMessage.replace(/^\[HTTP\s+\d+\]\s+[^:]+:\s*/, '');
-  const requiredMatch = message.match(/"required":\s*(\d+)/i);
-  const availableMatch = message.match(/"available":\s*(\d+)/i);
-  const pointsMatch = message.match(/"points_available":\s*(\d+)/i);
-
-  if (/Insufficient coins/i.test(message) && requiredMatch && availableMatch) {
-    const pointsSuffix = pointsMatch
-      ? ` You also have ${pointsMatch[1]} points, but points must be converted to coins first.`
-      : '';
-    return `Insufficient coins. Required: ${requiredMatch[1]}, available: ${availableMatch[1]}.${pointsSuffix}`;
-  }
-
-  return message;
-}
-
-const BoostSheet = React.memo(function BoostSheet({
-  post,
-  visible,
-  onClose,
-  onSuccess,
-  onBuyCoins,
-}) {
-  const [config, setConfig] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState('');
-  const [availableCoins, setAvailableCoins] = useState(0);
-  const [availablePoints, setAvailablePoints] = useState(0);
-  const [selectedDuration, setSelectedDuration] = useState(12);
-  const [selectedGender, setSelectedGender] = useState('all');
-  const [selectedAgeMin, setSelectedAgeMin] = useState('');
-  const [selectedAgeMax, setSelectedAgeMax] = useState('');
-  const [selectedLocation, setSelectedLocation] = useState('');
-  const [calculatedCost, setCalculatedCost] = useState(null);
-
-  const durationOptions = [
-    { hours: 12, label: '12 Hours', label_extra: '100 coins' },
-    { hours: 24, label: '24 Hours', label_extra: '170 coins' },
-    { hours: 72, label: '3 Days', label_extra: '300 coins' },
-  ];
-
-  useEffect(() => {
-    if (!visible || !post) return;
-
-    let active = true;
-    setLoading(true);
-    setError('');
-    setCalculatedCost(null);
-    setSelectedDuration(12);
-    setSelectedGender('all');
-    setSelectedAgeMin('');
-    setSelectedAgeMax('');
-    setSelectedLocation('');
-
-    Promise.all([
-      api.request('/boost/config/', { skipCache: true }),
-      api.request('/wallet/', { skipCache: true }),
-    ])
-      .then(([boostConfig, wallet]) => {
-        if (!active) return;
-        setConfig(boostConfig);
-        setAvailableCoins(wallet?.balance?.total || 0);
-        setAvailablePoints(wallet?.points?.current || 0);
-      })
-      .catch((loadError) => {
-        if (!active) return;
-        setError(formatBoostError(loadError));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [visible, post?.id]);
-
-  useEffect(() => {
-    if (!visible || !post || !config) return;
-
-    if (selectedAgeMin && selectedAgeMax && Number(selectedAgeMin) > Number(selectedAgeMax)) {
-      setCalculatedCost(null);
-      setError('Minimum age cannot be greater than maximum age.');
-      return;
-    }
-
-    let active = true;
-    setError('');
-
-    api.request('/boost/calculate-cost/', {
-      method: 'POST',
-      body: JSON.stringify({
-        duration_hours: selectedDuration,
-        target_gender: selectedGender,
-        target_age_min: selectedAgeMin || null,
-        target_age_max: selectedAgeMax || null,
-        target_location: selectedLocation.trim() || null,
-      }),
-    })
-      .then((response) => {
-        if (active) setCalculatedCost(response);
-      })
-      .catch((costError) => {
-        if (!active) return;
-        setCalculatedCost(null);
-        setError(formatBoostError(costError));
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [visible, post?.id, config, selectedDuration, selectedGender, selectedAgeMin, selectedAgeMax, selectedLocation]);
-
-  const handleCreateBoost = async () => {
-    if (!post || !calculatedCost) return;
-
-    if (calculatedCost.cost > availableCoins) {
-      const pointHint = availablePoints > 0
-        ? ` You also have ${availablePoints} points, but points must be converted to coins first.`
-        : '';
-      Alert.alert(
-        'Not Enough Coins',
-        `This boost costs ${Math.round(calculatedCost.cost)} coins, but your spendable coin balance is ${availableCoins}.${pointHint}`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Buy Coins Here', onPress: onBuyCoins },
-        ]
-      );
-      return;
-    }
-
-    setCreating(true);
-    setError('');
-
-    try {
-      const response = await api.request('/boost/campaigns/', {
-        method: 'POST',
-        body: JSON.stringify({
-          reel_id: post.id,
-          duration_hours: selectedDuration,
-          target_gender: selectedGender,
-          target_age_min: selectedAgeMin || null,
-          target_age_max: selectedAgeMax || null,
-          target_location: selectedLocation.trim() || null,
-        }),
-      });
-
-      onSuccess?.(response);
-    } catch (createError) {
-      setError(formatBoostError(createError));
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}
-    >
-      <View style={styles.centeredModalOverlay}>
-        <TouchableOpacity style={StyleSheet.absoluteFillObject} activeOpacity={1} onPress={onClose} />
-        <View style={styles.boostSheet}>
-          <View style={styles.sheetHandle} />
-          <View style={styles.boostHeader}>
-            <View style={styles.boostHeaderLeft}>
-              <View style={styles.boostIconWrap}>
-                <Ionicons name="flash" size={18} color={GOLD} />
-              </View>
-              <View>
-                <Text style={styles.sheetTitle}>Boost Your Post</Text>
-                <Text style={styles.boostSubtitle}>Reach more people with coins</Text>
-              </View>
-            </View>
-            <TouchableOpacity onPress={onClose} style={styles.boostCloseBtn}>
-              <Ionicons name="close" size={22} color="#999" />
-            </TouchableOpacity>
-          </View>
-
-          {loading ? (
-            <View style={styles.boostLoadingWrap}>
-              <ActivityIndicator color={GOLD} />
-              <Text style={styles.boostLoadingText}>Loading boost options...</Text>
-            </View>
-          ) : (
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.boostContent}>
-              <View style={styles.boostSection}>
-                <Text style={styles.boostSectionTitle}>Select Duration</Text>
-                <View style={styles.boostDurationGrid}>
-                  {durationOptions.map((option) => {
-                    const selected = selectedDuration === option.hours;
-                    return (
-                      <TouchableOpacity
-                        key={option.hours}
-                        style={[styles.boostDurationCard, selected && styles.boostDurationCardActive]}
-                        onPress={() => setSelectedDuration(option.hours)}
-                      >
-                        <Text style={[styles.boostDurationLabel, selected && styles.boostDurationLabelActive]}>{option.label}</Text>
-                        {!!option.label_extra && (
-                          <Text style={styles.boostDurationExtra}>{option.label_extra}</Text>
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </View>
-
-              <View style={styles.boostSummaryCard}>
-                <View style={styles.boostSummaryRow}>
-                  <Text style={styles.boostSummaryLabel}>Boost Cost</Text>
-                  <Text style={[styles.boostSummaryValue, styles.boostSummaryValueAccent]}>
-                    {calculatedCost ? `${Math.round(calculatedCost.cost)} coins` : 'Calculating...'}
-                  </Text>
-                </View>
-              </View>
-
-              {!!error && (
-                <View style={styles.boostErrorBox}>
-                  <Text style={styles.boostErrorText}>{error}</Text>
-                </View>
-              )}
-
-              <View style={styles.boostActionRow}>
-                <TouchableOpacity style={styles.boostSecondaryBtn} onPress={onClose}>
-                  <Text style={styles.boostSecondaryBtnText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.boostPrimaryBtn,
-                    (creating || !calculatedCost || calculatedCost.cost > availableCoins) && styles.boostPrimaryBtnDisabled,
-                  ]}
-                  onPress={handleCreateBoost}
-                  disabled={creating || !calculatedCost || calculatedCost.cost > availableCoins}
-                >
-                  {creating ? (
-                    <ActivityIndicator color="#fff" size="small" />
-                  ) : (
-                    <>
-                      <Ionicons name="flash" size={16} color="#fff" />
-                      <Text style={styles.boostPrimaryBtnText}>Boost Post</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          )}
-        </View>
-      </View>
-    </Modal>
-  );
-});
-
-// Custom component for displaying images at original size without cutting or cropping
+// Display image full width of the card without black space and without cutting/cropping the original image
 const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
   const [imageSize, setImageSize] = useState({ width: null, height: null });
   const [loading, setLoading] = useState(true);
 
-  const normalizeUrl = useCallback((url) => {
-    if (!url || typeof url !== 'string') return null;
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file://') || url.startsWith('content://')) {
-      return url;
-    }
-    const baseUrl = config.API_BASE_URL.replace('/api', '');
-    return url.startsWith('/') ? `${baseUrl}${url}` : `${baseUrl}/${url}`;
-  }, []);
-
-  const normalizedUrl = useMemo(() => normalizeUrl(imageUrl), [imageUrl, normalizeUrl]);
-
   useEffect(() => {
-    if (!normalizedUrl) {
-      setLoading(false);
-      return;
-    }
     let isMounted = true;
-    Image.getSize(
-      normalizedUrl,
-      (w, h) => {
-        if (isMounted && w > 0 && h > 0) {
-          setImageSize({ width: w, height: h });
-          setLoading(false);
+    if (imageUrl) {
+      Image.getSize(
+        imageUrl,
+        (w, h) => {
+          if (isMounted && w && h) {
+            setImageSize({ width: w, height: h });
+            setLoading(false);
+          }
+        },
+        () => {
+          if (isMounted) setLoading(false);
         }
-      },
-      (err) => {
-        console.log('Failed to get image size for:', normalizedUrl, err);
-      }
-    );
+      );
+    }
     return () => {
       isMounted = false;
     };
-  }, [normalizedUrl]);
+  }, [imageUrl]);
   
   const handleImageLoad = useCallback((e) => {
-    const source = e?.nativeEvent?.source;
-    const imgWidth = source?.width;
-    const imgHeight = source?.height;
-    console.log('OriginalSizeImage loaded with dimensions:', { imgWidth, imgHeight });
+    const { width: imgWidth, height: imgHeight } = e?.nativeEvent?.source || {};
     if (imgWidth && imgHeight) {
       setImageSize({ width: imgWidth, height: imgHeight });
     }
@@ -502,42 +218,42 @@ const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
   }, []);
   
   const handleImageError = useCallback((e) => {
-    console.log('OriginalSizeImage failed to load:', e.nativeEvent);
+    console.log('OriginalSizeImage failed to load:', e?.nativeEvent);
     setLoading(false);
   }, []);
   
-  // Calculate dynamic container size based on natural image aspect ratio so it is never cut
+  // Dynamic container matches image aspect ratio:
+  // Fills 100% of card width, has NO black space, and never crops the image
   const containerStyle = useMemo(() => {
     if (imageSize.width && imageSize.height) {
-      const ratio = imageSize.width / imageSize.height;
-      const clampedRatio = Math.max(0.55, Math.min(ratio, 1.91));
       return {
         width: '100%',
-        aspectRatio: clampedRatio,
-        backgroundColor: '#0D0D0D',
+        aspectRatio: imageSize.width / imageSize.height,
       };
     }
     return {
       width: '100%',
-      aspectRatio: 1, // Default 1:1 until natural size arrives
-      backgroundColor: '#0D0D0D',
+      aspectRatio: 1, // Default 1:1 while loading
+      backgroundColor: '#1a1a1a',
     };
   }, [imageSize]);
   
   return (
-    <TouchableOpacity style={[containerStyle, style]} onPress={onPress} activeOpacity={0.95}>
+    <TouchableOpacity style={[containerStyle, style]} onPress={onPress} activeOpacity={0.95} pointerEvents="box-none">
       <Image
-        source={{ uri: normalizedUrl }}
+        source={{ uri: imageUrl }}
         style={{ 
           width: '100%', 
           height: '100%',
-          backgroundColor: '#0D0D0D',
         }}
-        resizeMode="contain"
+        resizeMode="cover"
         onError={handleImageError}
         onLoad={handleImageLoad}
+        // Ensure high quality rendering
+        fadeDuration={200}
+        defaultSource={null}
       />
-      {loading && !imageSize.width && (
+      {loading && (
         <View style={{ 
           position: 'absolute', 
           top: 0, 
@@ -546,7 +262,7 @@ const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
           bottom: 0, 
           justifyContent: 'center', 
           alignItems: 'center',
-          backgroundColor: '#0D0D0D'
+          backgroundColor: '#1a1a1a'
         }}>
           <ActivityIndicator size="small" color={GOLD} />
         </View>
@@ -562,21 +278,10 @@ function ZoomableImage({ imageUrl }) {
   const lastTap = useRef(0);
   const [loading, setLoading] = useState(true);
 
-  const normalizeUrl = useCallback((url) => {
-    if (!url || typeof url !== 'string') return null;
-    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file://') || url.startsWith('content://')) {
-      return url;
-    }
-    const baseUrl = config.API_BASE_URL.replace('/api', '');
-    return url.startsWith('/') ? `${baseUrl}${url}` : `${baseUrl}/${url}`;
-  }, []);
-
-  const normalizedUrl = useMemo(() => normalizeUrl(imageUrl), [imageUrl, normalizeUrl]);
-
   useEffect(() => {
     imageOpacity.setValue(0);
     setLoading(true);
-  }, [normalizedUrl, imageOpacity]);
+  }, [imageUrl, imageOpacity]);
 
   const handleLoad = useCallback(() => {
     setLoading(false);
@@ -618,7 +323,7 @@ function ZoomableImage({ imageUrl }) {
     >
       <Animated.View style={{ flex: 1 }} onTouchEnd={handleTouchEnd}>
         <Animated.Image
-          source={{ uri: normalizedUrl }}
+          source={{ uri: imageUrl }}
           style={{ flex: 1, width: '100%', opacity: imageOpacity, transform: [{ scale: Animated.multiply(scale, pinchScale) }] }}
           resizeMode="contain"
           onLoad={handleLoad}
@@ -634,133 +339,6 @@ function ZoomableImage({ imageUrl }) {
   );
 }
 
-// Simple auto-play video for feed (muted, looped, tap → reels)
-const FeedVideo = ({ uri, onPress, paused = false }) => {
-  const [isMuted, setIsMuted] = useState(true);
-  const [videoSize, setVideoSize] = useState({ width: null, height: null });
-  const src = useMemo(() => {
-    if (!uri) return null;
-    if (uri.startsWith('http://') || uri.startsWith('https://') || uri.startsWith('file://')) return uri;
-    const b = config.API_BASE_URL.replace('/api', '');
-    return uri.startsWith('/') ? b + uri : b + '/' + uri;
-  }, [uri]);
-
-  const player = useVideoPlayer(src, p => {
-    p.loop = true;
-    p.muted = true;
-    if (!paused) {
-      p.play();
-    }
-  });
-
-  useEffect(() => {
-    if (!player) return;
-    try {
-      if (player.videoTrack?.size?.width && player.videoTrack?.size?.height) {
-        setVideoSize(player.videoTrack.size);
-      }
-      const sub = player.addListener?.('videoTrackChange', (payload) => {
-        const track = payload?.videoTrack;
-        if (track?.size?.width && track?.size?.height) {
-          setVideoSize(track.size);
-        }
-      });
-      return () => {
-        sub?.remove?.();
-      };
-    } catch (e) {
-      // safe ignore
-    }
-  }, [player]);
-
-  // Control play/pause based on paused prop
-  useEffect(() => {
-    if (!player) return;
-    try {
-      if (paused) {
-        player.pause();
-      } else {
-        player.play();
-      }
-    } catch (e) {
-      console.log('FeedVideo pause/play error:', e);
-    }
-  }, [paused, player]);
-
-  // Toggle mute
-  const toggleMute = useCallback((e) => {
-    e?.stopPropagation();
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    player.muted = newMuted;
-    console.log('Toggle mute - isMuted:', newMuted, 'player.muted:', player.muted);
-  }, [player, isMuted]);
-
-  // Enhanced memory cleanup for video
-  useEffect(() => {
-    return () => {
-      try {
-        player?.pause();
-        player?.replace(); // Clear video source to free memory
-      } catch(e) {
-        console.log('Video cleanup error:', e);
-      }
-    };
-  }, [player]);
-
-  const containerStyle = useMemo(() => {
-    if (videoSize.width && videoSize.height) {
-      const ratio = videoSize.width / videoSize.height;
-      const clampedRatio = Math.max(0.55, Math.min(ratio, 1.91));
-      return {
-        width: '100%',
-        aspectRatio: clampedRatio,
-        backgroundColor: '#000',
-      };
-    }
-    return {
-      width: '100%',
-      aspectRatio: 4 / 5,
-      backgroundColor: '#000',
-    };
-  }, [videoSize]);
-
-  if (!src) return null;
-  return (
-    <View style={containerStyle}>
-      <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={{ width: '100%', height: '100%' }}>
-        <VideoView
-          player={player}
-          style={{ width: '100%', height: '100%' }}
-          contentFit="contain"
-          nativeControls={false}
-          allowsFullscreenMode={false}
-          allowsAudioPlayback={true}
-          pointerEvents="none"
-        />
-      </TouchableOpacity>
-      <TouchableOpacity
-        onPress={toggleMute}
-        style={{
-          position: 'absolute',
-          bottom: 12,
-          left: 12,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          borderRadius: 20,
-          padding: 8,
-        }}
-        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-      >
-        <Ionicons
-          name={isMuted ? 'volume-mute' : 'volume-high'}
-          size={20}
-          color="#fff"
-        />
-      </TouchableOpacity>
-    </View>
-  );
-};
-
 const SkeletonPost = React.memo(() => {
   return (
     <View style={{ backgroundColor: CARD, marginBottom: 8, padding: 12 }}>
@@ -771,7 +349,7 @@ const SkeletonPost = React.memo(() => {
           <View style={{ width: 60, height: 10, borderRadius: 5, backgroundColor: '#222' }} />
         </View>
       </View>
-      <View style={{ width: '100%', height: width * 0.75, borderRadius: 8, backgroundColor: '#2a2a2a' }} />
+      <View style={{ width: '100%', height: width * 0.6, borderRadius: 8, backgroundColor: '#2a2a2a' }} />
       <View style={{ flexDirection: 'row', marginTop: 10, gap: 16 }}>
         <View style={{ width: 48, height: 12, borderRadius: 6, backgroundColor: '#2a2a2a' }} />
         <View style={{ width: 48, height: 12, borderRadius: 6, backgroundColor: '#2a2a2a' }} />
@@ -780,86 +358,6 @@ const SkeletonPost = React.memo(() => {
   );
 });
 
-function ReportModal({ post, onClose, onSubmit }) {
-  const { colors } = useTheme();
-  const [selectedReason, setSelectedReason] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-
-  const reportReasons = [
-    { id: 'spam', label: 'Spam', icon: 'alert-circle-outline', description: 'Unwanted or repetitive content' },
-    { id: 'inappropriate', label: 'Inappropriate Content', icon: 'warning-outline', description: 'Offensive or harmful content' },
-    { id: 'harassment', label: 'Harassment', icon: 'person-outline', description: 'Bullying or targeting individuals' },
-    { id: 'other', label: 'Other', icon: 'ellipsis-horizontal-outline', description: 'Other issues not listed' },
-  ];
-
-  const handleSubmit = async () => {
-    if (!selectedReason || submitting) return;
-    setSubmitting(true);
-    try {
-      await onSubmit(post, selectedReason);
-      onClose();
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <View style={styles.modalOverlay}>
-      <View style={styles.reportSheet}>
-        <View style={styles.reportHeader}>
-          <View style={styles.reportHeaderContent}>
-            <View style={styles.reportIconContainer}>
-              <Ionicons name="flag-outline" size={24} color={GOLD} />
-            </View>
-            <View>
-              <Text style={styles.reportTitle}>Report Content</Text>
-              <Text style={styles.reportSubtitle}>Help keep our community safe</Text>
-            </View>
-          </View>
-          <TouchableOpacity style={styles.reportCloseButton} onPress={onClose}>
-            <Ionicons name="close" size={24} color={colors.textSecondary} />
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView style={styles.reportContent} contentContainerStyle={styles.reportReasonsContainer}>
-          {reportReasons.map((reason) => {
-            const selected = selectedReason === reason.id;
-            return (
-              <TouchableOpacity
-                key={reason.id}
-                style={[styles.reportReasonItem, selected && styles.reportReasonItemSelected]}
-                onPress={() => setSelectedReason(reason.id)}
-              >
-                <View style={styles.reportReasonIcon}>
-                  <Ionicons name={reason.icon} size={20} color={selected ? GOLD : colors.textSecondary} />
-                </View>
-                <View style={styles.reportReasonContent}>
-                  <Text style={[styles.reportReasonText, selected && styles.reportReasonTextSelected]}>{reason.label}</Text>
-                  <Text style={styles.reportReasonDescription}>{reason.description}</Text>
-                </View>
-                {selected ? <Ionicons style={styles.reportReasonCheck} name="checkmark-circle" size={22} color={GOLD} /> : null}
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        <View style={styles.reportActions}>
-          <TouchableOpacity style={styles.reportCancelBtn} onPress={onClose}>
-            <Text style={styles.reportCancelText}>Cancel</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.reportSubmitBtn, (!selectedReason || submitting) && styles.reportSubmitBtnDisabled]}
-            onPress={handleSubmit}
-            disabled={!selectedReason || submitting}
-          >
-            {submitting ? <ActivityIndicator color="#000" /> : <Text style={styles.reportSubmitText}>Submit</Text>}
-          </TouchableOpacity>
-        </View>
-      </View>
-    </View>
-  );
-}
-
 
 export default function HomeScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
@@ -867,14 +365,12 @@ export default function HomeScreen({ navigation, route }) {
   const { colors } = useTheme();
   const { filterBlockedUsers } = useBlock();
   const user = auth?.user ?? null;
-  const { hasActiveSubscription } = auth;
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const fetchPostsRef = useRef(false);
   const [commentPost, setCommentPost] = useState(null);
   const [comments, setComments] = useState([]);
   const [commentText, setCommentText] = useState('');
@@ -884,15 +380,15 @@ export default function HomeScreen({ navigation, route }) {
   const [loadingComments, setLoadingComments] = useState(false);
   const [activeTab, setActiveTab] = useState('For You');
   const [showOptions, setShowOptions] = useState(null);
-  const [showReportModal, setShowReportModal] = useState(null);
   const [optionsPosition, setOptionsPosition] = useState({ x: 0, y: 0 });
   const optionsButtonRef = useRef(null);
   const [followStates, setFollowStates] = useState({});
   const [viewCounts, setViewCounts] = useState({});
   const [shareToast, setShareToast] = useState('');
   const [showPostInfoModal, setShowPostInfoModal] = useState(null);
-  const [showBoostModal, setShowBoostModal] = useState(null);
   const [showGiftModal, setShowGiftModal] = useState(false);
+  const [giftSuccessModalVisible, setGiftSuccessModalVisible] = useState(false);
+  const [giftSuccessMessage, setGiftSuccessMessage] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [localShareCounts, setLocalShareCounts] = useState({}); // Track local share increments
   const [localGiftCounts, setLocalGiftCounts] = useState({}); // Track local gift count increments
@@ -908,7 +404,6 @@ export default function HomeScreen({ navigation, route }) {
   const [selectedPostForShare, setSelectedPostForShare] = useState(null);
   const shareSearchTimer = useRef(null);
   const [showHorizontalSuggestions, setShowHorizontalSuggestions] = useState(true);
-  const [showCampaignSuggestions, setShowCampaignSuggestions] = useState(true);
   const [suggestionPositions, setSuggestionPositions] = useState(new Set());
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -916,23 +411,6 @@ export default function HomeScreen({ navigation, route }) {
   const [searchLoading, setSearchLoading] = useState(false);
   const searchTimeoutRef = useRef(null);
   const [selectedImageUrl, setSelectedImageUrl] = useState(null);
-
-  // Like/comment/share are free for everyone (matches web behavior).
-  // Only gifting (real coin cost) requires an active subscription.
-  const requireSubscription = () => {
-    if (!hasActiveSubscription) {
-      Alert.alert(
-        'Subscription Required',
-        'You need an active subscription to interact with posts. Subscribe now to unlock all features!',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Subscribe', onPress: () => navigation.navigate('Subscription') }
-        ]
-      );
-      return false;
-    }
-    return true;
-  };
   const [giftPost, setGiftPost] = useState(null); // full post object for gift context
   const [giftRecipient, setGiftRecipient] = useState('');
   const [giftMessage, setGiftMessage] = useState('');
@@ -988,16 +466,7 @@ export default function HomeScreen({ navigation, route }) {
       // Pause all videos when screen loses focus
       setPosts(prev => prev.map(post => ({ ...post, paused: true })));
     });
-    
-    const focusUnsubscribe = navigation.addListener('focus', () => {
-      // Resume videos when screen comes back into focus
-      setPosts(prev => prev.map(post => ({ ...post, paused: false })));
-    });
-    
-    return () => {
-      unsubscribe();
-      focusUnsubscribe();
-    };
+    return unsubscribe;
   }, [navigation]);
 
   const CATEGORY_ICONS = {
@@ -1019,7 +488,7 @@ export default function HomeScreen({ navigation, route }) {
   useEffect(() => {
     if (activeTab === 'For You') {
       // Show stale cache immediately, refresh in background
-      const stale = api.requestStale(`/reels/?limit=${LIMIT}&offset=0&include_campaigns=true`, (fresh) => {
+      const stale = api.requestStale(`/reels/?limit=${LIMIT}&offset=0&high_quality=true`, (fresh) => {
         const results = Array.isArray(fresh) ? fresh : (fresh.results || []);
         
         // DEBUG: Log first post to see what URLs we're getting
@@ -1047,11 +516,6 @@ export default function HomeScreen({ navigation, route }) {
               const uniqueId = `suggestions-${index}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
               withSuggestions.push({ type: 'horizontal_suggestions', id: uniqueId });
             }
-            // Insert campaign suggestions after 5th post (index 4)
-            if (index === 4) {
-              const campaignId = `campaign-suggestions-${index}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-              withSuggestions.push({ type: 'horizontal_campaign_suggestions', id: campaignId });
-            }
           });
           finalResults = withSuggestions;
         }
@@ -1063,7 +527,7 @@ export default function HomeScreen({ navigation, route }) {
         // Filter out posts from blocked users
         const filteredFinalResults = filterBlockedUsers(updatedFinalResults);
         setPosts(filteredFinalResults);
-        setHasMore(results.length >= LIMIT);
+        setHasMore(results.length === LIMIT);
         setPage(0);
       });
       if (stale) {
@@ -1082,11 +546,6 @@ export default function HomeScreen({ navigation, route }) {
               const uniqueId = `suggestions-stale-${index}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
               withSuggestions.push({ type: 'horizontal_suggestions', id: uniqueId });
             }
-            // Insert campaign suggestions after 5th post (index 4)
-            if (index === 4) {
-              const campaignId = `campaign-suggestions-stale-${index}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-              withSuggestions.push({ type: 'horizontal_campaign_suggestions', id: campaignId });
-            }
           });
           finalResults = withSuggestions;
         }
@@ -1098,7 +557,7 @@ export default function HomeScreen({ navigation, route }) {
         // Filter out posts from blocked users
         const filteredFinalResults = filterBlockedUsers(updatedFinalResults);
         setPosts(filteredFinalResults);
-        setHasMore(results.length >= LIMIT);
+        setHasMore(results.length === LIMIT);
         setPage(0);
         setLoading(false);
       } else {
@@ -1106,17 +565,6 @@ export default function HomeScreen({ navigation, route }) {
       }
     }
   }, [activeTab]);
-
-  // Refresh when screen comes into focus (when tab is pressed)
-  useFocusEffect(
-    useCallback(() => {
-      if (activeTab === 'For You') {
-        // Trigger a refresh when returning to this tab
-        fetchPosts(0, true);
-      }
-      // Don't add fetchPosts to dependencies to avoid infinite loops
-    }, [activeTab])
-  );
 
   useEffect(() => {
     const loadUserCoins = async () => {
@@ -1139,15 +587,6 @@ export default function HomeScreen({ navigation, route }) {
     };
     loadUserCoins();
   }, [showGiftModal]);
-
-  const refreshUserCoins = async () => {
-    try {
-      const wallet = await api.request('/wallet/', { skipCache: true });
-      setUserCoins(wallet.balance?.purchased || 0);
-    } catch (error) {
-      console.error('Failed to refresh user coins:', error);
-    }
-  };
 
   // Auto-claim daily login bonus on app open (once per day)
   useEffect(() => {
@@ -1205,13 +644,11 @@ export default function HomeScreen({ navigation, route }) {
   }, [filterBlockedUsers]);
 
   const fetchPosts = async (offset = 0, reset = false) => {
-    if (fetchPostsRef.current) return;
-    fetchPostsRef.current = true;
     try {
       if (reset) setLoading(true); else setLoadingMore(true);
       
-      // Fetch regular posts and campaign posts
-      const data = await api.request(`/reels/?limit=${LIMIT}&offset=${offset}&include_campaigns=true`, { skipCache: true });
+      // Fetch regular posts and campaign posts with high quality images
+      const data = await api.request(`/reels/?limit=${LIMIT}&offset=${offset}&include_campaigns=true&high_quality=true`, { skipCache: true });
       const results = Array.isArray(data) ? data : (data.results || []);
       
       console.log('[HOMESCREEN] Fetched posts:', results.length);
@@ -1250,7 +687,7 @@ export default function HomeScreen({ navigation, route }) {
       const filteredResults = filterBlockedUsers(updatedResults);
       
       setPosts(prev => reset ? filteredFinalResults : [...prev, ...filteredResults]);
-      setHasMore(results.length >= LIMIT);
+      setHasMore(results.length === LIMIT);
       setPage(offset);
     } catch (e) {
       console.error('Feed error:', e);
@@ -1258,7 +695,6 @@ export default function HomeScreen({ navigation, route }) {
       setLoading(false);
       setRefreshing(false);
       setLoadingMore(false);
-      fetchPostsRef.current = false;
     }
   };
 
@@ -1325,6 +761,20 @@ export default function HomeScreen({ navigation, route }) {
     
     setShowShareModal(false);
     const isCampaign = !!(selectedPostForShare.is_campaign_post || selectedPostForShare.campaign_id || selectedPostForShare.campaign);
+    const SHARE_COST = 5;
+
+    if (isCampaign && userCoins < SHARE_COST) {
+      Alert.alert(
+        'Oops! Not Enough Coins',
+        `Sharing this campaign costs ${SHARE_COST} coins, but you only have ${userCoins} coin(s).\n\nWant to share more? Get more coins and keep supporting amazing campaigns!`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Buy Coins Here', onPress: () => navigation.navigate('WebsiteCoin') },
+        ]
+      );
+      return;
+    }
+
     const webUrl = `https://uat.flipstar.et/post/${selectedPostForShare.id}`;
     const appUrl = `flipstar://post/${selectedPostForShare.id}`;
     const title = selectedPostForShare.caption ? selectedPostForShare.caption.slice(0, 80) : 'Check out this post on FlipStar';
@@ -1346,9 +796,8 @@ export default function HomeScreen({ navigation, route }) {
         p.id === selectedPostForShare.id ? { ...p, shares: (p.shares || 0) + 1 } : p
       ));
       
-      // The backend performs the campaign coin deduction.
-      const shareResponse = await api.request(`/reels/${selectedPostForShare.id}/share/`, { method: 'POST' });
-      if (shareResponse?.shares == null) {
+      // Fire share count API in background
+      api.request(`/reels/${selectedPostForShare.id}/share/`, { method: 'POST' }).catch(() => {
         // Revert on failure
         setLocalShareCounts(prev => ({
           ...prev,
@@ -1357,10 +806,12 @@ export default function HomeScreen({ navigation, route }) {
         setPosts(prev => prev.map(p => 
           p.id === selectedPostForShare.id ? { ...p, shares: Math.max(0, (p.shares || 1) - 1) } : p
         ));
-        throw new Error('Share was not recorded');
-      }
+      });
       
       if (isCampaign) {
+        setUserCoins(prev => Math.max(0, prev - SHARE_COST));
+        showCampaignToast(` −${SHARE_COST} coins · +${SHARE_COST} score earned by creator`);
+        
         setTimeout(() => {
           if (selectedPostForShare?.campaign_id) {
             CampaignEventEmitter.emit('campaign_interaction', { 
@@ -1544,18 +995,13 @@ export default function HomeScreen({ navigation, route }) {
     return null;
   };
 
-  const showPostOptions = (post, event) => {
-    const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
-    const dropdownWidth = 180;
-    const estimatedDropdownHeight = user?.id === post.user?.id ? 360 : 300;
-    const touchX = event?.nativeEvent?.pageX ?? screenWidth - 24;
-    const touchY = event?.nativeEvent?.pageY ?? 80;
-    const left = Math.max(12, Math.min(touchX - dropdownWidth + 24, screenWidth - dropdownWidth - 12));
-    const top = touchY + 8 + estimatedDropdownHeight > screenHeight
-      ? Math.max(12, touchY - estimatedDropdownHeight - 8)
-      : touchY + 8;
-
-    setOptionsPosition({ x: left, y: top });
+  const showPostOptions = (post) => {
+    // Position dropdown in upper right corner of the card (Instagram-style)
+    // Fixed position from top-right of screen
+    setOptionsPosition({ 
+      x: Dimensions.get('window').width - 200, // 200px from left (right-aligned)
+      y: 60 // 60px from top (below header)
+    });
     setShowOptions(post);
   };
 
@@ -1605,11 +1051,6 @@ export default function HomeScreen({ navigation, route }) {
     setShowOptions(null);
   };
 
-  const openBoostModal = (post) => {
-    setShowBoostModal(post);
-    setShowOptions(null);
-  };
-
   const downloadPost = async (post) => {
     const url = post.media || post.image;
     if (!url) return;
@@ -1638,16 +1079,27 @@ export default function HomeScreen({ navigation, route }) {
       await api.request(`/reels/${post.id}/`, { method: 'DELETE' });
       setPosts(prev => prev.filter(p => p.id !== post.id));
       setShowOptions(null);
-      AppAlert.alert('Post Deleted', 'Your post was deleted successfully.', undefined, '🗑️');
+      setShareToast('Post deleted successfully');
+      setTimeout(() => setShareToast(''), 2000);
     } catch (error) {
       console.error('Delete error:', error);
-      AppAlert.alert('Delete Failed', 'Failed to delete post. Please try again.', undefined, '⚠️');
+      setShareToast('Failed to delete post');
+      setTimeout(() => setShareToast(''), 2000);
     }
   };
 
   const reportPost = (post) => {
+    Alert.alert(
+      'Report Post',
+      'Why are you reporting this post?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Spam', onPress: () => submitReport(post, 'spam') },
+        { text: 'Inappropriate', onPress: () => submitReport(post, 'inappropriate') },
+        { text: 'Other', onPress: () => submitReport(post, 'other') },
+      ]
+    );
     setShowOptions(null);
-    setShowReportModal(post);
   };
 
   const submitReport = async (post, reason) => {
@@ -1660,25 +1112,18 @@ export default function HomeScreen({ navigation, route }) {
           description: `Reported as ${reason}`,
         }),
       });
-      AppAlert.alert('Report Submitted', 'Thank you for your report. We will review it shortly.', undefined, '🚩');
+      Alert.alert('Success', 'Report submitted successfully');
     } catch (error) {
-      AppAlert.alert('Report Failed', 'Failed to submit report. Please try again.', undefined, '⚠️');
+      Alert.alert('Error', 'Failed to submit report');
     }
   };
 
-  const goToReel = useCallback((postId, postItem) => {
-    const targetId = postId || postItem?.id;
-    if (!targetId) return;
-    const foundPost = postItem || posts.find(p => String(p.id) === String(targetId)) || null;
-    // Immediately pause all feed videos so sound stops cleanly before navigation
-    setPosts(prev => prev.map(p => ({ ...p, paused: true })));
-    navigation.navigate('ReelsDetail', {
-      initialVideoId: targetId,
-      initialReel: foundPost,
-      fromHome: true,
-    });
-    trackView(targetId); // fire in background, don't block navigation
-  }, [navigation, posts]);
+  const goToReel = useCallback((postId) => {
+    console.log('goToReel called with postId:', postId);
+    trackView(postId);
+    console.log('Navigating to ReelsDetail with initialVideoId:', postId);
+    navigation.navigate('ReelsDetail', { initialVideoId: postId });
+  }, [navigation]);
 
   const showCampaignToast = useCallback((message) => {
     setCampaignToast(message);
@@ -1688,49 +1133,50 @@ export default function HomeScreen({ navigation, route }) {
   const toggleLike = useCallback(async (post) => {
     const newLiked = !post.is_liked;
     const isCampaign = !!(post.is_campaign_post || post.campaign_id || post.campaign);
-    setPosts(prev => prev.map(p => {
-      if (p.id !== post.id) return p;
-      let newLikedBy = Array.isArray(p.liked_by) ? [...p.liked_by] : [];
-      if (newLiked && user) {
-        if (!newLikedBy.some(u => u.id === user.id)) {
-          newLikedBy = [{
-            id: user.id,
-            username: user.username,
-            full_name: (user.first_name || user.username),
-            profile_photo: user.profile_photo || user.profile?.profile_photo || null,
-          }, ...newLikedBy].slice(0, 2);
-        }
-      } else if (!newLiked && user) {
-        newLikedBy = newLikedBy.filter(u => u.id !== user.id);
+    const VOTE_COST = 1;
+
+    if (isCampaign && newLiked) {
+      if (userCoins < VOTE_COST) {
+        Alert.alert(
+          'Oops! Not Enough Coins',
+          `Voting costs ${VOTE_COST} coin, but you only have ${userCoins} coin(s).\n\nYour vote matters! Get more coins and support your favorite campaigns.`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Buy Coins Here', onPress: () => navigation.navigate('WebsiteCoin') },
+          ]
+        );
+        return;
       }
-      return {
-        ...p,
-        is_liked: newLiked,
-        votes: newLiked ? (p.votes + 1) : Math.max(0, p.votes - 1),
-        liked_by: newLikedBy,
-      };
-    }));
-    try {
-      await api.request(`/reels/${post.id}/vote/`, { method: 'POST' });
-    } catch (error) {
-      console.log('Vote error:', error);
-      setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_liked: post.is_liked, votes: post.votes, liked_by: post.liked_by } : p));
     }
-  }, [user, navigation, showCampaignToast]);
+
+    setPosts(prev => prev.map(p => p.id === post.id
+      ? { ...p, is_liked: newLiked, votes: newLiked ? (p.votes + 1) : Math.max(0, p.votes - 1) }
+      : p));
+    try { 
+      await api.request(`/reels/${post.id}/vote/`, { method: 'POST' });
+      if (isCampaign && newLiked) {
+        setUserCoins(prev => Math.max(0, prev - VOTE_COST));
+        showCampaignToast(`🪙 −${VOTE_COST} coin · +${VOTE_COST} score earned by creator`);
+      }
+    } catch { 
+      setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_liked: post.is_liked, votes: post.votes } : p));
+    }
+  }, [userCoins, navigation, showCampaignToast]);
 
   const toggleSave = useCallback(async (post) => {
     const newSaved = !post.is_saved;
     setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_saved: newSaved } : p));
     try {
-      await api.request(`/reels/${post.id}/save/`, { method: 'POST' });
-    } catch {
+      // Use the API function for consistency
+      await api.toggleSavePost(post.id);
+    } catch (error) {
+      console.error('Error toggling save:', error);
+      // Revert the change on error
       setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_saved: post.is_saved } : p));
     }
   }, []);
 
   const openGiftModal = (postOrUser) => {
-    if (!requireSubscription()) return;
-
     // Accept either a full post object or just a user object
     const isPost = postOrUser && ('votes' in postOrUser || 'caption' in postOrUser || 'gifts_count' in postOrUser);
     const postUser = isPost ? postOrUser.user : postOrUser;
@@ -1771,69 +1217,81 @@ export default function HomeScreen({ navigation, route }) {
     setSendingGift(true);
     setGiftError('');
     try {
-      const recipientUsername = giftPost?.user?.username || giftRecipient;
+      // Use /gift-transactions/ with recipient_id + reel_id so the gift is
+      // associated with the post and gifts_count reflects it in the feed.
+      const recipientId = giftPost?.user?.id;
       const reelId = giftPost?.id;
 
-      // Use the gamification/gift endpoint which is definitely encrypted and working
-      const response = await api.request('/gamification/gift/', {
-        method: 'POST',
-        body: JSON.stringify({
-          recipient_username: recipientUsername,
-          amount: selectedGift.coin_value * giftQuantity,
-          message: giftMessage,
-        }),
-      });
-      
-      console.log('Gift send response:', response);
-      
-      if (response && (response.id || response.success)) {
-        setGiftSent(true);
-        setUserCoins(prev => prev - totalCost);
-        setGiftsSentToday(prev => prev + 1);
-        
-        // Update local gift count immediately
-        if (giftPost) {
-          setPosts(prev => prev.map(p => 
-            p.id === giftPost.id ? { ...p, gifts_count: (p.gifts_count || 0) + giftQuantity } : p
-          ));
-          
-          // Update local gift counts tracking
-          const newLocalGiftCounts = { ...localGiftCountsRef.current };
-          newLocalGiftCounts[giftPost.id] = (newLocalGiftCounts[giftPost.id] || 0) + giftQuantity;
-          localGiftCountsRef.current = newLocalGiftCounts;
-          setLocalGiftCounts(newLocalGiftCounts);
-        }
-        
-        // Immediately update any campaign leaderboards that might be showing this entry
-        if (giftPost?.campaign_id) {
-          setTimeout(() => {
-            console.log('[CAMPAIGN] Gift sent, triggering leaderboard update for campaign:', giftPost.campaign_id);
-            CampaignEventEmitter.emit('campaign_interaction', { 
-              type: 'gift', 
-              campaignId: giftPost.campaign_id, 
-              postId: giftPost.id,
-              quantity: giftQuantity
-            });
-          }, 100);
-        }
-        
-        // Backend will update gifts_count, refresh posts to show updated count
-        setTimeout(() => {
-          // Refresh posts to get updated gift count from backend
-          fetchPosts(page);
-        }, 1000);
-        
-        // Play coin sound for successful gift
-        SoundManager.playCoinSound();
-        
-        setTimeout(() => {
-          setShowGiftModal(false);
-          setGiftSent(null);
-        }, 2000);
+      // Always try recipient_id first, fallback to username if unavailable
+      if (recipientId) {
+        await api.request('/gift-transactions/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            gift_id: selectedGift.id,
+            recipient_id: recipientId,
+            reel_id: reelId || undefined,
+            quantity: giftQuantity,
+            message: giftMessage,
+          }),
+        });
       } else {
-        console.error('Gift send failed:', response);
-        setGiftError(response?.message || 'Failed to send gift');
+        // Fallback: use username endpoint but still pass reel_id if we have it
+        await api.request('/gifts/send/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            gift_id: selectedGift.id,
+            recipient_username: giftRecipient,
+            reel_id: reelId || undefined,
+            quantity: giftQuantity,
+            message: giftMessage,
+          }),
+        });
       }
+      setGiftSent(true);
+      setUserCoins(prev => prev - totalCost);
+      setGiftsSentToday(prev => prev + 1);
+      
+      // Update local gift count immediately
+      if (giftPost) {
+        setPosts(prev => prev.map(p => 
+          p.id === giftPost.id ? { ...p, gifts_count: (p.gifts_count || 0) + giftQuantity } : p
+        ));
+        
+        // Update local gift counts tracking
+        const newLocalGiftCounts = { ...localGiftCountsRef.current };
+        newLocalGiftCounts[giftPost.id] = (newLocalGiftCounts[giftPost.id] || 0) + giftQuantity;
+        localGiftCountsRef.current = newLocalGiftCounts;
+        setLocalGiftCounts(newLocalGiftCounts);
+      }
+      
+      // Immediately update any campaign leaderboards that might be showing this entry
+      if (giftPost?.campaign_id) {
+        setTimeout(() => {
+          console.log('[CAMPAIGN] Gift sent, triggering leaderboard update for campaign:', giftPost.campaign_id);
+          CampaignEventEmitter.emit('campaign_interaction', { 
+            type: 'gift', 
+            campaignId: giftPost.campaign_id, 
+            postId: giftPost.id,
+            quantity: giftQuantity
+          });
+        }, 100);
+      }
+      
+      // Backend will update gifts_count, refresh posts to show updated count
+      setTimeout(() => {
+        // Refresh posts to get updated gift count from backend
+        fetchPosts(page);
+      }, 1000);
+      
+      // Play coin sound for successful gift
+      SoundManager.playCoinSound();
+      
+      setTimeout(() => {
+        setShowGiftModal(false);
+        setGiftSent(null);
+      }, 2000);
     } catch (error) {
       const errMsg = error?.message || '';
       const needsRecharge = errMsg.includes('Insufficient') || errMsg.includes('needs_recharge');
@@ -1859,7 +1317,6 @@ export default function HomeScreen({ navigation, route }) {
   };
 
   const openComments = async (post) => {
-    const isCampaign = !!(post.is_campaign_post || post.campaign_id || post.campaign);
     setCommentPost(post);
     setLoadingComments(true);
     try {
@@ -1913,9 +1370,9 @@ export default function HomeScreen({ navigation, route }) {
           });
         }
         
-        const res = await api.request(`/comments/${replyingTo.id}/reply/`, {
+        const res = await api.request(`/reels/${commentPost.id}/comments/`, {
           method: 'POST',
-          body: JSON.stringify({ text: commentText.trim() }),
+          body: JSON.stringify({ text: commentText.trim(), parent_id: replyingTo.id }),
         });
         if (!res.replies) res.replies = [];
         
@@ -1946,6 +1403,10 @@ export default function HomeScreen({ navigation, route }) {
       // Wallet Impact Matrix: campaign post comment costs 2 coins
       const isCommentOnCampaign = !!(commentPost?.is_campaign_post || commentPost?.campaign_id || commentPost?.campaign);
       if (isCommentOnCampaign) {
+        const COMMENT_COST = 2;
+        setUserCoins(prev => Math.max(0, prev - COMMENT_COST));
+        showCampaignToast(`🪙 −${COMMENT_COST} coins · +${COMMENT_COST} score earned by creator`);
+        
         // Immediately update any campaign leaderboards that might be showing this entry
         // This will trigger a refresh of campaign detail screens if they're open
         setTimeout(() => {
@@ -2027,8 +1488,12 @@ export default function HomeScreen({ navigation, route }) {
       const found = (res?.users || []).find(
         (u) => (u.username || '').toLowerCase() === username.toLowerCase()
       );
-      if (found?.id) {
-        navigation.navigate('ProfileStack', { userId: found.id });
+      if (found?.id || found?.username) {
+        navigation.navigate('ProfileStack', { 
+          userId: found.id,
+          username: found.username,
+          user: found,
+        });
       }
     } catch (err) {
       console.warn('Failed to resolve mention to profile:', err);
@@ -2093,10 +1558,36 @@ export default function HomeScreen({ navigation, route }) {
     return (
       <View style={{ marginBottom: 16 }}>
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-          <Avatar uri={comment.user?.profile_photo} size={avatarSize} name={comment.user?.username} />
+          <TouchableOpacity onPress={() => {
+            const commentAuthorId = comment.user?.id ?? comment.user?.user_id ?? (typeof comment.user === 'number' ? comment.user : null);
+            const commentUsername = comment.user?.username;
+            if (commentAuthorId || commentUsername) {
+              setShowCommentsModal(false);
+              navigation.navigate('ProfileStack', { 
+                userId: commentAuthorId,
+                username: commentUsername,
+                user: typeof comment.user === 'object' ? comment.user : null,
+              });
+            }
+          }}>
+            <Avatar uri={comment.user?.profile_photo} size={avatarSize} name={comment.user?.username} />
+          </TouchableOpacity>
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Text style={styles.commentUser}>{comment.user?.username}</Text>
+              <TouchableOpacity onPress={() => {
+                const commentAuthorId = comment.user?.id ?? comment.user?.user_id ?? (typeof comment.user === 'number' ? comment.user : null);
+                const commentUsername = comment.user?.username;
+                if (commentAuthorId || commentUsername) {
+                  setShowCommentsModal(false);
+                  navigation.navigate('ProfileStack', { 
+                    userId: commentAuthorId,
+                    username: commentUsername,
+                    user: typeof comment.user === 'object' ? comment.user : null,
+                  });
+                }
+              }}>
+                <Text style={styles.commentUser}>{comment.user?.username}</Text>
+              </TouchableOpacity>
               <Text style={{ color: '#666', fontSize: 11 }}>{timeAgo(comment.created_at)}</Text>
             </View>
             <TextWithMentions text={comment.text} style={styles.commentText} />
@@ -2144,113 +1635,21 @@ export default function HomeScreen({ navigation, route }) {
     );
   };
 
-  const renderLikedBy = useCallback((post) => {
-    const totalVotes = post.votes || 0;
-    const likers = Array.isArray(post.liked_by) ? post.liked_by.slice(0, 2) : [];
-    if (totalVotes <= 0 && likers.length === 0) {
-      return null;
-    }
-
-    const getAvatarUri = (photo) => {
-      if (!photo) return null;
-      if (photo.startsWith('http://') || photo.startsWith('https://')) return photo;
-      const b = config.API_BASE_URL.replace('/api', '');
-      return photo.startsWith('/') ? b + photo : b + '/' + photo;
-    };
-
-    return (
-      <View style={styles.likedByContainer}>
-        {likers.length > 0 ? (
-          <View style={styles.likedByAvatarsRow}>
-            {likers.map((u, i) => {
-              const photoUri = getAvatarUri(u.profile_photo);
-              return (
-                <TouchableOpacity
-                  key={u.id || i}
-                  activeOpacity={0.8}
-                  onPress={() => u.id && navigation.navigate('ProfileStack', { userId: u.id })}
-                  style={[
-                    styles.likedByAvatarWrap,
-                    { borderColor: colors.cardBg },
-                    i > 0 && styles.likedByAvatarOverlap,
-                  ]}
-                >
-                  {photoUri ? (
-                    <Image source={{ uri: photoUri }} style={styles.likedByAvatarImg} resizeMode="cover" />
-                  ) : (
-                    <Text style={styles.likedByAvatarInitials}>
-                      {(u.username?.[0] || 'U').toUpperCase()}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        ) : (
-          <Ionicons name="heart" size={13} color="#8fc441" style={{ marginRight: 2 }} />
-        )}
-
-        <Text style={[styles.likedByText, { color: colors.textSecondary }]}>
-          Liked by{' '}
-          {likers.length > 0 ? (
-            likers.length === 1 ? (
-              <>
-                <Text
-                  style={[styles.likedByBold, { color: colors.text }]}
-                  onPress={() => likers[0].id && navigation.navigate('ProfileStack', { userId: likers[0].id })}
-                >
-                  {likers[0].username}
-                </Text>
-                {totalVotes > 1 ? (
-                  <> and <Text style={[styles.likedByBold, { color: colors.text }]}>{totalVotes - 1} {totalVotes - 1 === 1 ? 'other' : 'others'}</Text></>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <Text
-                  style={[styles.likedByBold, { color: colors.text }]}
-                  onPress={() => likers[0].id && navigation.navigate('ProfileStack', { userId: likers[0].id })}
-                >
-                  {likers[0].username}
-                </Text>
-                {', '}
-                <Text
-                  style={[styles.likedByBold, { color: colors.text }]}
-                  onPress={() => likers[1].id && navigation.navigate('ProfileStack', { userId: likers[1].id })}
-                >
-                  {likers[1].username}
-                </Text>
-                {totalVotes > 2 ? (
-                  <> and <Text style={[styles.likedByBold, { color: colors.text }]}>{totalVotes - 2} {totalVotes - 2 === 1 ? 'other' : 'others'}</Text></>
-                ) : null}
-              </>
-            )
-          ) : (
-            <Text style={[styles.likedByBold, { color: colors.text }]}>
-              {totalVotes} {totalVotes === 1 ? 'person' : 'people'}
-            </Text>
-          )}
-        </Text>
-      </View>
-    );
-  }, [navigation, colors]);
-
   const renderPost = useCallback(({ item: post, index }) => {
     // Render horizontal suggestions after 2nd post (index 1)
     if (post.type === 'horizontal_suggestions' || post.type === 'suggestions') {
       return showHorizontalSuggestions ? (
         <HorizontalUserSuggestions 
-          onUserClick={(userId) => navigation.navigate('ProfileStack', { userId })}
+          onUserClick={(userId, userObj) => {
+            const resolvedId = userId || userObj?.id;
+            const resolvedUsername = userObj?.username;
+            navigation.navigate('ProfileStack', { 
+              userId: resolvedId,
+              username: resolvedUsername,
+              user: typeof userObj === 'object' ? userObj : null,
+            });
+          }}
           onDismiss={() => setShowHorizontalSuggestions(false)}
-        />
-      ) : null;
-    }
-    // Render campaign suggestions after 4th post (index 3)
-    if (post.type === 'horizontal_campaign_suggestions') {
-      return showCampaignSuggestions ? (
-        <HorizontalCampaignSuggestions
-          onCampaignClick={(campaignId) => navigation.navigate('CampaignDetail', { campaignId })}
-          onDismiss={() => setShowCampaignSuggestions(false)}
         />
       ) : null;
     }
@@ -2268,9 +1667,6 @@ export default function HomeScreen({ navigation, route }) {
     console.log('Post user username:', post.user?.username);
     console.log('Post user first_name:', post.user?.first_name);
     const isOwnPost = user?.id === post.user?.id;
-    const boostEndsAt = post.boost_ends_at || boostEndTimeCache.get(post.id);
-    const isBoostActive = Boolean(post.is_boosted) &&
-      (!boostEndsAt || new Date(boostEndsAt) > new Date());
     const isFollowing = post.user?.is_following || followStates[post.user?.id];
     const isCampaignPost = !!(post.is_campaign_post || post.campaign_id || post.campaign);
     
@@ -2282,11 +1678,21 @@ export default function HomeScreen({ navigation, route }) {
         <View style={styles.postHeader}>
           <TouchableOpacity
             style={styles.postUser}
-            onPress={() => navigation.navigate('ProfileStack', { userId: post.user?.id })}
+            onPress={() => {
+              const targetUserId = post.user?.id ?? post.user?.user_id ?? post.author_id ?? (typeof post.user === 'number' ? post.user : null);
+              const targetUsername = post.user?.username;
+              if (targetUserId || targetUsername) {
+                navigation.navigate('ProfileStack', { 
+                  userId: targetUserId,
+                  username: targetUsername,
+                  user: typeof post.user === 'object' ? post.user : null,
+                });
+              }
+            }}
           >
             <Avatar uri={post.user?.profile_photo} size={36} name={post.user?.username || post.user?.full_name || 'User'} />
             <View style={{ marginLeft: 10, flex: 1 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Text style={[styles.username, { color: '#8fc441' }]}>{post.user?.username || post.user?.full_name || 'User'}</Text>
               </View>
               {post.created_at ? (
@@ -2294,25 +1700,9 @@ export default function HomeScreen({ navigation, route }) {
               ) : null}
             </View>
           </TouchableOpacity>
-
-          <View style={styles.postHeaderActions}>
-            {isOwnPost && (
-              isBoostActive ? (
-                <View style={styles.postBoostedBadge}>
-                  <Ionicons name="flash" size={12} color="#1A1A1A" />
-                  <Text style={styles.postBoostedBadgeText}>Boosted</Text>
-                </View>
-              ) : (
-                <TouchableOpacity
-                  style={styles.postBoostNowBtn}
-                  onPress={() => openBoostModal(post)}
-                >
-                  <Ionicons name="flash-outline" size={12} color={GOLD} />
-                  <Text style={styles.postBoostNowText}>Boost Now</Text>
-                </TouchableOpacity>
-              )
-            )}
-
+            
+          {/* Header Right Actions */}
+          <View style={styles.headerRightActions}>
             {/* Follow/Unfollow button - only show for other users' posts */}
             {user && post.user?.id !== user.id && (
               <TouchableOpacity
@@ -2330,77 +1720,90 @@ export default function HomeScreen({ navigation, route }) {
                 </Text>
               </TouchableOpacity>
             )}
-
-            {/* Options - moved to header upper right */}
+            
+            {/* Options */}
             <TouchableOpacity
               style={styles.headerOptionsBtn}
-              onPress={(event) => showPostOptions(post, event)}
+              onPress={() => showPostOptions(post)}
             >
               <Ionicons name="ellipsis-horizontal" size={20} color={colors.text} />
             </TouchableOpacity>
           </View>
         </View>
 
-        {isCampaignPost && !isOwnPost && (
-          <TouchableOpacity
-            style={styles.campaignBadgeRow}
+        {/* Irreecha Stars Banner - Only show for posts from Irreecha Stars campaign */}
+        {(post.campaign?.title?.toLowerCase().includes('irreecha') || 
+          post.campaign_title?.toLowerCase().includes('irreecha') ||
+          post.campaign_name?.toLowerCase().includes('irreecha') ||
+          isCampaignPost && (post.campaign?.title === 'Irreecha Stars' || post.campaign_title === 'Irreecha Stars')) && (
+          <TouchableOpacity 
+            style={styles.irrechaStarsBanner}
             onPress={() => {
+              // Navigate to Irreecha Stars campaign or handle action
               const campaignId = post.campaign_id || post.campaign?.id;
               if (campaignId) {
-                console.log('Campaign name tapped, navigating to campaign detail:', campaignId);
                 navigation.navigate('CampaignDetail', { campaignId });
               }
             }}
           >
-            <View style={styles.campaignBadge}>
-              <View style={styles.campaignBadgeContent}>
-                <Text style={styles.campaignBadgeTitle} numberOfLines={1}>
-                  {post.campaign?.title || post.campaign_title || post.campaign_name || 'Campaign Entry'}
-                </Text>
-                {(post.campaign?.total_entries || post.campaign?.entries_count || 0) > 0 && (
-                  <Text style={styles.campaignBadgeMeta} numberOfLines={1}>
-                    {post.campaign?.total_entries || post.campaign?.entries_count || 0} participants
-                  </Text>
-                )}
-              </View>
-              <View style={styles.campaignViewBtn}>
-                <Text style={styles.campaignViewBtnText}>View</Text>
-                <Ionicons name="chevron-forward" size={11} color="#0D0D0D" />
-              </View>
+            <Text style={styles.irrechaStarsTitle}>Irreecha Stars</Text>
+            <View style={styles.irrechaStarsViewButton}>
+              <Text style={styles.irrechaStarsViewText}>View</Text>
+              <Ionicons name="chevron-forward" size={14} color="#0D0D0D" />
             </View>
           </TouchableOpacity>
         )}
 
         {/* Media */}
-        {(post.thumbnail || post.media || post.image) && (() => {
-          const isVideo = !!(post.media && (
-            /\.(mp4|mov|webm|m4v|avi|m3u8|mkv|flv|wmv|3gp)(?:$|\?)/i.test(post.media) ||
-            post.media.includes('/video/') ||
-            post.media.includes('/reels/') ||
-            (!post.image && !/\.(jpg|jpeg|png|gif|webp|bmp|svg)(?:$|\?)/i.test(post.media))
-          ));
-          const imageUri = post.image || post.thumbnail || post.media;
-
-          return (
-            <View style={styles.mediaWrapper}>
-              {isVideo ? (
-                <FeedVideo uri={post.media} onPress={() => goToReel(post.id, post)} paused={post.paused} />
-              ) : imageUri ? (
-                <OriginalSizeImage imageUrl={imageUri} onPress={() => setSelectedImageUrl(imageUri)} />
-              ) : (
-                <View style={[styles.mediaImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#2a2a2a' }]}>
-                  <Text style={{ color: '#666', fontSize: 16 }}>No media</Text>
+        {(post.thumbnail || post.media || post.image) && (
+          <View style={styles.mediaWrapper}>
+            {post.thumbnail ? (
+              <>
+                {/* If there's media (video), make it clickable */}
+                {post.media ? (
+                  <TouchableOpacity onPress={() => goToReel(post.id)} activeOpacity={0.9}>
+                    <OriginalSizeImage imageUrl={post.image || post.thumbnail} />
+                    {/* Play icon overlay for videos */}
+                    <View style={styles.playOverlay}>
+                      <Ionicons name="play-circle" size={48} color="rgba(255,255,255,0.9)" />
+                    </View>
+                  </TouchableOpacity>
+                ) : (
+                  /* Just thumbnail, no video - make it clickable for zoom - prioritize original image */
+                  <OriginalSizeImage imageUrl={post.image || post.thumbnail} onPress={() => setSelectedImageUrl(post.image || post.thumbnail)} />
+                )}
+              </>
+            ) : post.media ? (
+              /* Has video media - make it clickable */
+              <TouchableOpacity onPress={() => goToReel(post.id)} activeOpacity={0.9}>
+                {post.image ? (
+                  <OriginalSizeImage imageUrl={post.image} onPress={() => setSelectedImageUrl(post.image)} />
+                ) : (
+                  <View style={[styles.mediaImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: colors.cardBg }]}>
+                    <Ionicons name="videocam" size={64} color={colors.textSecondary} />
+                  </View>
+                )}
+                {/* Play icon overlay for videos */}
+                <View style={styles.playOverlay}>
+                  <Ionicons name="play-circle" size={48} color="rgba(255,255,255,0.9)" />
                 </View>
-              )}
-              
-              {/* View count badge */}
-              <View style={styles.viewBadge} pointerEvents="none">
-                <Ionicons name="eye" size={12} color="#fff" />
-                <Text style={styles.viewCount}>{(post.view_count || 0).toLocaleString()}</Text>
+              </TouchableOpacity>
+            ) : post.image ? (
+              /* Just image, no video - make it clickable for zoom */
+              <OriginalSizeImage imageUrl={post.image} onPress={() => setSelectedImageUrl(post.image)} />
+            ) : (
+              <View style={[styles.mediaImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#2a2a2a' }]}>
+                <Text style={{ color: '#666', fontSize: 16 }}>No media</Text>
               </View>
+            )}
+            
+            {/* View count badge */}
+            <View style={styles.viewBadge}>
+              <Ionicons name="eye" size={12} color="#fff" />
+              <Text style={styles.viewCount}>{(post.view_count || 0).toLocaleString()}</Text>
             </View>
-          );
-        })()}
+          </View>
+        )}
 
         {/* Actions */}
         <View style={styles.actions}>
@@ -2459,9 +1862,6 @@ export default function HomeScreen({ navigation, route }) {
           </View>
         </View>
 
-        {/* Liked by preview: 1 or 2 users who liked the post */}
-        {renderLikedBy(post)}
-
         {/* Caption */}
         {post.caption && (
           <TouchableOpacity 
@@ -2506,16 +1906,9 @@ export default function HomeScreen({ navigation, route }) {
 
         {/* Hashtags */}
         {renderHashtags(post.hashtags_list || post.hashtags)}
-
-        {isBoostActive && (
-          <View style={styles.trendingFooter}>
-            <Ionicons name="trending-up" size={14} color="#1A1A1A" />
-            <Text style={styles.trendingFooterText}>Trending</Text>
-          </View>
-        )}
       </View>
     );
-  }, [user, followStates, navigation, toggleLike, toggleSave, sharePost, goToReel, openComments, openGiftModal, showPostOptions, showCampaignToast, openBoostModal, renderLikedBy]);
+  }, [user, followStates, navigation, toggleLike, toggleSave, sharePost, goToReel, openComments, openGiftModal, showPostOptions, showCampaignToast]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -2600,7 +1993,11 @@ export default function HomeScreen({ navigation, route }) {
                       style={[styles.searchUserItem, { borderBottomColor: colors.border }]}
                       onPress={() => {
                         clearSearch();
-                        navigation.navigate('ProfileStack', { userId: user.id });
+                        navigation.navigate('ProfileStack', { 
+                          userId: user.id,
+                          username: user.username,
+                          user: user,
+                        });
                       }}
                     >
                       <Avatar uri={user.profile_photo} size={36} name={user.username} />
@@ -2650,7 +2047,7 @@ export default function HomeScreen({ navigation, route }) {
                       style={[styles.searchPostItem, { borderBottomColor: colors.border }]}
                       onPress={() => {
                         clearSearch();
-                        goToReel(post.id, post);
+                        goToReel(post.id);
                       }}
                     >
                       <View style={{ flex: 1 }}>
@@ -2702,7 +2099,7 @@ export default function HomeScreen({ navigation, route }) {
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
           }
           onEndReached={onEndReached}
-          onEndReachedThreshold={0.2}
+          onEndReachedThreshold={0.5}
           ListHeaderComponent={null}
           ListFooterComponent={loadingMore ? <ActivityIndicator color={colors.primary} style={{ padding: 16 }} /> : null}
           ListEmptyComponent={
@@ -2712,14 +2109,12 @@ export default function HomeScreen({ navigation, route }) {
             </View>
           }
           showsVerticalScrollIndicator={false}
-          // Memory optimization props
+          contentContainerStyle={{ paddingBottom: 80 + insets.bottom }}
           removeClippedSubviews={true}
           maxToRenderPerBatch={5}
-          updateCellsBatchingPeriod={100}
+          windowSize={3}
           initialNumToRender={3}
-          windowSize={10}
-          legacyImplementation={false}
-          contentContainerStyle={{ paddingBottom: 80 + insets.bottom }}
+          updateCellsBatchingPeriod={50}
           disableIntervalMomentum={true}
           decelerationRate="normal"
           bounces={false}
@@ -2728,24 +2123,6 @@ export default function HomeScreen({ navigation, route }) {
       ) : null}
 
       {/* Share Toast */}
-      <Modal
-        visible={!!selectedImageUrl}
-        transparent={false}
-        animationType="fade"
-        onRequestClose={() => setSelectedImageUrl(null)}
-      >
-        <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center' }}>
-          <ZoomableImage imageUrl={selectedImageUrl} />
-          <TouchableOpacity
-            onPress={() => setSelectedImageUrl(null)}
-            style={{ position: 'absolute', top: insets.top + 12, right: 16, padding: 8 }}
-            accessibilityLabel="Close image"
-          >
-            <Ionicons name="close-circle" size={34} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      </Modal>
-
       {shareToast !== '' && (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{shareToast}</Text>
@@ -2841,12 +2218,6 @@ export default function HomeScreen({ navigation, route }) {
           onPress={() => setShowOptions(null)}
         >
           <View style={[styles.optionsDropdown, { top: optionsPosition.y, left: optionsPosition.x }]}>
-            {user?.id === showOptions?.user?.id && (
-              <TouchableOpacity style={styles.dropdownItem} onPress={() => openBoostModal(showOptions)}>
-                <Ionicons name="flash-outline" size={18} color={GOLD} />
-                <Text style={styles.dropdownText}>Boost Post</Text>
-              </TouchableOpacity>
-            )}
             <TouchableOpacity style={styles.dropdownItem} onPress={() => showPostInfo(showOptions)}>
               <Ionicons name="information-circle-outline" size={18} color={GOLD} />
               <Text style={styles.dropdownText}>Post Info</Text>
@@ -2881,60 +2252,6 @@ export default function HomeScreen({ navigation, route }) {
         </TouchableOpacity>
       </Modal>
 
-      <BoostSheet
-        post={showBoostModal}
-        visible={!!showBoostModal}
-        onClose={() => setShowBoostModal(null)}
-        onBuyCoins={() => {
-          setShowBoostModal(null);
-          navigation.navigate('WebsiteCoin');
-        }}
-        onSuccess={async (response) => {
-          const boostedPostId = showBoostModal?.id;
-
-          if (boostedPostId && response?.end_time) {
-            boostEndTimeCache.set(boostedPostId, response.end_time);
-          }
-          setPosts((prev) => prev.map((item) => (
-            item?.id === boostedPostId
-              ? { ...item, is_boosted: true, boost_ends_at: response?.end_time || null }
-              : item
-          )));
-          CampaignEventEmitter.emit('boost_updated', {
-            postId: boostedPostId,
-            timestamp: Date.now(),
-          });
-          setShowBoostModal(null);
-
-          try {
-            const wallet = await api.request('/wallet/', { skipCache: true });
-            setUserCoins(wallet?.balance?.purchased || 0);
-          } catch (walletError) {
-            console.error('Failed to refresh wallet after boost:', walletError);
-          }
-
-          AppAlert.alert(
-            'Boost Started',
-            `Your post is now boosted. Expected reach: ~${Number(response?.expected_impressions || 0).toLocaleString()} impressions.`,
-            undefined,
-            '🚀'
-          );
-        }}
-      />
-
-      <Modal
-        visible={!!showReportModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowReportModal(null)}
-      >
-        <ReportModal
-          post={showReportModal}
-          onClose={() => setShowReportModal(null)}
-          onSubmit={submitReport}
-        />
-      </Modal>
-
       {/* Comments Modal */}
       <Modal
         visible={!!commentPost}
@@ -2947,7 +2264,7 @@ export default function HomeScreen({ navigation, route }) {
           keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 80}
           style={styles.modalOverlay}
         >
-          <View style={[styles.commentsSheet, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+          <View style={styles.commentsSheet}>
             <View style={styles.sheetHandle} />
             <View style={styles.sheetHeader}>
               <Text style={styles.sheetTitle}>Comments</Text>
@@ -2955,7 +2272,7 @@ export default function HomeScreen({ navigation, route }) {
                 <Ionicons name="close" size={24} color="#fff" />
               </TouchableOpacity>
             </View>
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 8 }} showsVerticalScrollIndicator={false}>
+            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
               {loadingComments ? (
                 <View style={{ padding: 32, alignItems: 'center' }}>
                   <ActivityIndicator color={GOLD} />
@@ -2985,7 +2302,7 @@ export default function HomeScreen({ navigation, route }) {
               </View>
             )}
             
-            <View style={[styles.commentInput, { paddingBottom: 12 + insets.bottom }]}> 
+            <View style={styles.commentInput}>
               <Avatar uri={user?.profile_photo} size={32} name={user?.username} />
               <TextInput
                 style={styles.commentTextInput}
@@ -3026,137 +2343,29 @@ export default function HomeScreen({ navigation, route }) {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Gift Modal */}
-      <Modal
+      {/* Telebirr Gift Modal */}
+      <TelebirrGiftModal
         visible={showGiftModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowGiftModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowGiftModal(false)}
-        >
-          <TouchableOpacity style={styles.giftSheet} activeOpacity={1}>
-            <View style={styles.sheetHandle} />
-            <View style={styles.sheetHeader}>
-              <Text style={styles.sheetTitle}>🎁 Gift to @{giftRecipient}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.coinBalance}>🪙 {userCoins}</Text>
-                  <Text style={styles.coinLabel}>Purchased Coins</Text>
-                  <Text style={styles.giftLimitLabel}>{giftsSentToday}/{dailyGiftLimit} gifts today</Text>
-                </View>
-                <TouchableOpacity onPress={() => setShowGiftModal(false)}>
-                  <Ionicons name="close" size={24} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            </View>
+        onClose={() => setShowGiftModal(false)}
+        recipientUsername={giftRecipient || 'User'}
+        reelId={giftPost?.id || null}
+        onGiftSent={(giftData) => {
+          console.log('Gift sent from HomeScreen:', giftData);
+          const giftName = giftData?.gift?.name || giftData?.gift?.amharicName || 'gift';
+          const rec = giftData?.recipient || giftRecipient || 'creator';
+          const qty = giftData?.quantity > 1 ? `${giftData.quantity}x ` : '';
+          setGiftSuccessMessage(`You have sent ${qty}${giftName} to @${rec} successfully! 🎉`);
+          setGiftSuccessModalVisible(true);
+        }}
+      />
 
-            {giftSent ? (
-              <View style={{ alignItems: 'center', padding: 32 }}>
-                <Text style={{ fontSize: 64, marginBottom: 12 }}>🎉</Text>
-                <Text style={{ fontSize: 20, fontWeight: '800', color: GOLD, marginBottom: 4 }}>Gift Sent!</Text>
-                <Text style={{ fontSize: 14, color: '#78716C', marginBottom: 24, textAlign: 'center' }}>
-                  Your gift has been sent successfully
-                </Text>
-                <TouchableOpacity
-                  style={styles.sendButton}
-                  onPress={() => setShowGiftModal(false)}
-                >
-                  <Text style={styles.sendButtonText}>Done 🎊</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-                {/* Category Filter */}
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.categoryFilter}
-                  contentContainerStyle={{ paddingHorizontal: 12 }}
-                >
-                  {['all', ...new Set(gifts.map(g => g.category))].map(cat => (
-                    <TouchableOpacity
-                      key={cat}
-                      style={[styles.categoryButton, selectedCategory === cat && styles.categoryButtonActive]}
-                      onPress={() => setSelectedCategory(cat)}
-                    >
-                      <Text style={[styles.categoryButtonText, selectedCategory === cat && styles.categoryButtonTextActive]}>
-                        {cat !== 'all' && CATEGORY_ICONS[cat]} {cat.charAt(0).toUpperCase() + cat.slice(1)}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-
-                {/* Gift Selection Grid */}
-                <View style={styles.giftGrid}>
-                  {(selectedCategory === 'all' ? gifts : gifts.filter(g => g.category === selectedCategory)).map(gift => (
-                    <TouchableOpacity
-                      key={gift.id}
-                      style={[styles.giftItem, selectedGift?.id === gift.id && styles.giftItemActive]}
-                      onPress={() => { setSelectedGift(gift); setGiftQuantity(1); }}
-                    >
-                      <Text style={styles.giftEmoji}>{gift.image_url ? '🎁' : (CATEGORY_ICONS[gift.category] || '🎁')}</Text>
-                      <Text style={styles.giftCoinValue}>{gift.coin_value}🪙</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* Selected Gift Info & Quantity */}
-                {selectedGift && (
-                  <View style={styles.selectedGiftContainer}>
-                    <Text style={styles.selectedGiftName}>{selectedGift.name}</Text>
-                    <View style={styles.quantitySelector}>
-                      <TouchableOpacity
-                        style={styles.quantityButton}
-                        onPress={() => setGiftQuantity(Math.max(1, giftQuantity - 1))}
-                      >
-                        <Text style={styles.quantityButtonText}>−</Text>
-                      </TouchableOpacity>
-                      <Text style={styles.quantityValue}>{giftQuantity}</Text>
-                      <TouchableOpacity
-                        style={styles.quantityButton}
-                        onPress={() => setGiftQuantity(giftQuantity + 1)}
-                      >
-                        <Text style={styles.quantityButtonText}>+</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )}
-
-                {/* Message Input */}
-                <Text style={styles.fieldLabel}>Message (optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Add a message..."
-                  placeholderTextColor="#666"
-                  value={giftMessage}
-                  onChangeText={setGiftMessage}
-                />
-
-                {giftError ? <Text style={styles.errorText}>{giftError}</Text> : null}
-
-                {/* Send Button */}
-                <TouchableOpacity
-                  style={[styles.sendButton, sendingGift && { opacity: 0.6 }]}
-                  onPress={sendGift}
-                  disabled={sendingGift || !selectedGift}
-                >
-                  {sendingGift ? (
-                    <ActivityIndicator size="small" color="#000" />
-                  ) : (
-                    <Text style={styles.sendButtonText}>
-                      Send Gift · 🪙 {selectedGift ? selectedGift.coin_value * giftQuantity : 0}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              </ScrollView>
-            )}
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+      {/* Gift Sent Success Popup Modal */}
+      <SuccessModal
+        visible={giftSuccessModalVisible}
+        onClose={() => setGiftSuccessModalVisible(false)}
+        title="You Sent Successfully!"
+        message={giftSuccessMessage}
+      />
 
       {/* Share Modal */}
       <Modal
@@ -3165,7 +2374,7 @@ export default function HomeScreen({ navigation, route }) {
         animationType="fade"
         onRequestClose={() => setShowShareModal(false)}
       >
-        <View style={styles.shareModalOverlay}>
+        <View style={styles.modalOverlay}>
           <View style={styles.shareModal}>
             <View style={styles.shareModalHeader}>
               <Text style={styles.shareModalTitle}>Share Post</Text>
@@ -3221,6 +2430,25 @@ export default function HomeScreen({ navigation, route }) {
               <Text style={styles.shareExternalButtonText}>Share externally</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* Image Zoom Modal */}
+      <Modal
+        visible={!!selectedImageUrl}
+        transparent={false}
+        animationType="fade"
+        onRequestClose={() => setSelectedImageUrl(null)}
+      >
+        <View style={{ flex: 1, backgroundColor: '#000', justifyContent: 'center' }}>
+          <ZoomableImage imageUrl={selectedImageUrl} />
+          <TouchableOpacity
+            onPress={() => setSelectedImageUrl(null)}
+            style={{ position: 'absolute', top: insets.top + 12, right: 16, padding: 8 }}
+            accessibilityLabel="Close image"
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </TouchableOpacity>
         </View>
       </Modal>
 
@@ -3386,9 +2614,6 @@ const styles = StyleSheet.create({
   campaignTab: {
     // Remove specific flex, let it use default
   },
-  leadersTab: {
-    marginRight: 4, // Keep small margin to create space between Leaders and search
-  },
   activeTab: {
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
@@ -3396,18 +2621,16 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
   },
+  leadersTab: {
+    marginRight: 10, // Create space between Leaders and search
+  },
   tabText: {
     fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 0,
-    textAlign: 'center',
-    numberOfLines: 1,
-    adjustsFontSizeToFit: true,
-    minimumFontScale: 0.8,
+    fontWeight: '600',
   },
   activeTabText: {
     color: '#000',
-    fontWeight: '800',
+    fontWeight: '700',
   },
   searchIconBtn: {
     width: 26,
@@ -3416,105 +2639,39 @@ const styles = StyleSheet.create({
     backgroundColor: CARD,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 8,
+    marginLeft: 10, // Create space from Leaders tab
   },
   
   // Post Card
   postCard: { 
     backgroundColor: CARD, 
     marginHorizontal: 8,
-    marginBottom: 16,
-    borderRadius: 16,
+    marginBottom: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: BORDER,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowRadius: 6,
+    elevation: 3,
   },
   postHeader: {
     flexDirection: 'row', 
-    alignItems: 'flex-start', 
+    alignItems: 'center', 
     justifyContent: 'space-between', 
-    padding: 12,
-  },
-  postUser: { flexDirection: 'row', alignItems: 'center', flex: 1, flexShrink: 1, marginRight: 10 },
-  username: { fontSize: 14, fontWeight: '700', color: '#fff' },
-  timeAgo: { fontSize: 12, color: LIGHT_GOLD, marginTop: 1 },
-  postHeaderActions: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    flexShrink: 0,
-  },
-  campaignBadgeRow: {
     paddingHorizontal: 12,
-    paddingBottom: 10,
+    paddingVertical: 8,
   },
-  campaignBadge: {
+  postUser: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  headerRightActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: 'rgba(143,196,65,0.13)',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: GOLD,
-    width: '100%',
-    minWidth: 0,
-    maxWidth: '100%',
   },
-  campaignTrendingTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: GOLD,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 20,
-  },
-  campaignTrendingTagText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#0D0D0D',
-    letterSpacing: 0.3,
-  },
-  campaignBadgeContent: {
-    flex: 1,
-    minWidth: 0,
-  },
-  campaignBadgeTitle: {
-    fontSize: 13,
-    color: '#fff',
-    fontWeight: '700',
-  },
-  campaignBadgeMeta: {
-    fontSize: 10,
-    color: GOLD,
-    fontWeight: '500',
-    marginTop: 1,
-  },
-  campaignViewBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    backgroundColor: GOLD,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 20,
-  },
-  campaignViewBtnText: {
-    fontSize: 11,
-    color: '#0D0D0D',
-    fontWeight: '800',
-  },
-  campaignBadgeAction: {
-    fontSize: 11,
-    color: GOLD,
-    fontWeight: '700',
-  },
+  username: { fontSize: 14, fontWeight: '700', color: '#fff' },
+  timeAgo: { fontSize: 12, color: LIGHT_GOLD, marginTop: 1 },
   followBtn: {
     backgroundColor: 'transparent',
     borderWidth: 1,
@@ -3522,46 +2679,10 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingVertical: 4,
     paddingHorizontal: 12,
-    alignSelf: 'flex-start',
   },
   headerOptionsBtn: {
     padding: 8,
     marginLeft: 8,
-    alignSelf: 'flex-start',
-  },
-  postBoostNowBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: GOLD,
-    backgroundColor: 'rgba(143,196,65,0.1)',
-    alignSelf: 'flex-start',
-    marginTop: 8,
-  },
-  postBoostNowText: {
-    color: GOLD,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  postBoostedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: GOLD,
-    alignSelf: 'flex-start',
-    marginTop: 8,
-  },
-  postBoostedBadgeText: {
-    color: '#1A1A1A',
-    fontSize: 11,
-    fontWeight: '800',
   },
   followingBtn: {
     backgroundColor: 'rgba(249,224,139,0.15)',
@@ -3575,6 +2696,38 @@ const styles = StyleSheet.create({
   followingBtnText: {
     color: GOLD,
   },
+  irrechaStarsBanner: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: 'rgba(143, 196, 65, 0.15)',
+    borderWidth: 1,
+    borderColor: '#8fc441',
+    marginHorizontal: 12,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  irrechaStarsTitle: {
+    fontSize: 15,
+    color: '#8fc441',
+    fontWeight: '600',
+  },
+  irrechaStarsViewButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#8fc441',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 4,
+  },
+  irrechaStarsViewText: {
+    fontSize: 13,
+    color: '#0D0D0D',
+    fontWeight: '600',
+  },
   optionsBtn: {
     padding: 4,
   },
@@ -3582,12 +2735,12 @@ const styles = StyleSheet.create({
   // Caption
   captionContainer: {
     paddingHorizontal: 12,
-    paddingBottom: 6,
+    paddingBottom: 4,
   },
   caption: { 
-    fontSize: 14, 
+    fontSize: 13, 
     color: '#ddd', 
-    lineHeight: 18,
+    lineHeight: 17,
   },
   captionUsername: {
     fontWeight: '700',
@@ -3604,7 +2757,7 @@ const styles = StyleSheet.create({
   mediaImage: { 
     width: '100%', 
     minHeight: 200, 
-    maxHeight: width * 2, // Increased from 1.2 to 2 to allow taller images
+    maxHeight: width * 0.8, // Reasonable max height that doesn't cut content 
     backgroundColor: '#111',
     aspectRatio: undefined, // Let image determine its own aspect ratio
   },
@@ -3686,25 +2839,6 @@ const styles = StyleSheet.create({
     marginLeft: 2,
     opacity: 0.85,
   },
-  trendingFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: GOLD,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,0,0,0.12)',
-  },
-  trendingFooterText: {
-    color: '#1A1A1A',
-    fontSize: 12,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
   campaignToast: {
     position: 'absolute',
     bottom: 90,
@@ -3739,7 +2873,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     justifyContent: 'space-between',
     paddingHorizontal: 12, 
-    paddingVertical: 10,
+    paddingVertical: 6,
   },
   leftActions: {
     flexDirection: 'row',
@@ -3764,55 +2898,11 @@ const styles = StyleSheet.create({
     marginLeft: 3,
     fontWeight: '600',
   },
-
-  // Liked By Profile Avatars and Text
-  likedByContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingBottom: 6,
-    gap: 8,
-  },
-  likedByAvatarsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  likedByAvatarWrap: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1.5,
-    backgroundColor: '#2A2A2A',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  likedByAvatarOverlap: {
-    marginLeft: -8,
-  },
-  likedByAvatarImg: {
-    width: '100%',
-    height: '100%',
-  },
-  likedByAvatarInitials: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: GOLD,
-  },
-  likedByText: {
-    fontSize: 12,
-    flex: 1,
-    flexWrap: 'wrap',
-    lineHeight: 16,
-  },
-  likedByBold: {
-    fontWeight: '700',
-  },
   
   // Comments
   recentComments: {
     paddingHorizontal: 12,
-    paddingBottom: 4,
+    paddingBottom: 2,
   },
   recentComment: {
     fontSize: 12,
@@ -3827,7 +2917,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#fff',
     paddingHorizontal: 12,
-    paddingBottom: 8,
+    paddingBottom: 6,
     fontWeight: '600',
   },
   
@@ -3836,18 +2926,13 @@ const styles = StyleSheet.create({
     fontSize: 13, 
     color: '#8fc441', 
     paddingHorizontal: 12, 
-    paddingBottom: 12, 
+    paddingBottom: 8, 
     fontWeight: '600', 
     lineHeight: 20,
   },
   
   // Modals
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  centeredModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
   optionsDropdown: {
     position: 'absolute',
     backgroundColor: CARD,
@@ -3875,374 +2960,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  reportSheet: {
-    backgroundColor: CARD,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    height: '72%',
-    paddingBottom: 24,
-  },
-  reportHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  reportHeaderContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  reportIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: 'rgba(143, 196, 65, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  reportTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  reportSubtitle: {
-    color: '#666',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  reportCloseButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  reportContent: {
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  reportReasonsContainer: {
-    paddingTop: 12,
-    paddingBottom: 8,
-  },
-  reportReasonItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-    borderRadius: 12,
-    marginBottom: 8,
-    backgroundColor: 'rgba(255,255,255,0.02)',
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  reportReasonItemSelected: {
-    backgroundColor: 'rgba(143, 196, 65, 0.15)',
-    borderColor: GOLD,
-  },
-  reportReasonIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  reportReasonContent: {
-    flex: 1,
-  },
-  reportReasonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  reportReasonTextSelected: {
-    color: GOLD,
-  },
-  reportReasonDescription: {
-    color: '#666',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  reportReasonCheck: {
-    marginLeft: 12,
-  },
-  reportActions: {
-    flexDirection: 'row',
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    gap: 12,
-  },
-  reportCancelBtn: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: 'rgba(255,255,255,0.02)',
-    alignItems: 'center',
-  },
-  reportCancelText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  reportSubmitBtn: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: GOLD,
-    alignItems: 'center',
-  },
-  reportSubmitBtnDisabled: {
-    backgroundColor: '#444',
-  },
-  reportSubmitText: {
-    color: '#000',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  boostSheet: {
-    backgroundColor: CARD,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '88%',
-    paddingBottom: 20,
-  },
-  boostHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  boostHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  boostIconWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(143,196,65,0.14)',
-  },
-  boostSubtitle: {
-    color: '#999',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  boostCloseBtn: {
-    padding: 6,
-  },
-  boostLoadingWrap: {
-    paddingVertical: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  boostLoadingText: {
-    color: '#bbb',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  boostContent: {
-    padding: 16,
-    gap: 18,
-  },
-  boostSection: {
-    gap: 10,
-  },
-  boostSectionTitle: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  boostDurationGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  boostDurationCard: {
-    width: '48%',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: '#111',
-    padding: 14,
-    marginBottom: 10,
-  },
-  boostDurationCardActive: {
-    borderColor: GOLD,
-    backgroundColor: 'rgba(143,196,65,0.12)',
-  },
-  boostDurationLabel: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  boostDurationLabelActive: {
-    color: GOLD,
-  },
-  boostDurationExtra: {
-    color: GOLD,
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  boostFieldLabel: {
-    color: '#bbb',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  boostChipRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  boostChip: {
-    flex: 1,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: '#111',
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  boostChipActive: {
-    borderColor: GOLD,
-    backgroundColor: 'rgba(143,196,65,0.12)',
-  },
-  boostChipText: {
-    color: '#bbb',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  boostChipTextActive: {
-    color: GOLD,
-  },
-  boostInputRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  boostInput: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: '#111',
-    color: '#fff',
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    fontSize: 14,
-  },
-  boostInputHalf: {
-    flex: 1,
-  },
-  boostSummaryCard: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(143,196,65,0.25)',
-    backgroundColor: 'rgba(143,196,65,0.08)',
-    padding: 14,
-    gap: 10,
-  },
-  boostSummaryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  boostSummaryLabel: {
-    color: '#ddd',
-    fontSize: 13,
-  },
-  boostSummaryValue: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-    flexShrink: 1,
-    textAlign: 'right',
-  },
-  boostSummaryValueAccent: {
-    color: GOLD,
-  },
-  boostSummaryValueDanger: {
-    color: '#EF4444',
-  },
-  boostDivider: {
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  boostErrorBox: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    backgroundColor: 'rgba(239,68,68,0.12)',
-    padding: 12,
-  },
-  boostErrorText: {
-    color: '#EF4444',
-    fontSize: 13,
-  boostInfoBox: {
-    backgroundColor: 'rgba(212, 175, 55, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(212, 175, 55, 0.35)',
-    borderRadius: 16,
-    padding: 12,
-    marginBottom: 16,
-  },
-    fontWeight: '600',
-  },
-  boostActionRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 4,
-  },
-  boostSecondaryBtn: {
-    flex: 1,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  boostSecondaryBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  boostPrimaryBtn: {
-    flex: 1,
-    borderRadius: 12,
-    backgroundColor: GOLD,
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 8,
-  },
-  boostPrimaryBtnDisabled: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  boostPrimaryBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
   
   // Comments Modal
   commentsSheet: {
@@ -4252,6 +2969,10 @@ const styles = StyleSheet.create({
     height: '45%',
     width: '100%',
     paddingBottom: 20,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
   },
   infoSheet: {
     backgroundColor: CARD,
@@ -4479,7 +3200,7 @@ const styles = StyleSheet.create({
   },
 
   // Share Modal Styles
-  shareModalOverlay: {
+  modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',

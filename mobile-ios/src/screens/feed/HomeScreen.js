@@ -20,6 +20,8 @@ import { AppAlert } from '../../components/common/AppAlert';
 import HorizontalUserSuggestions from '../../components/common/HorizontalUserSuggestions';
 import HorizontalCampaignSuggestions from '../../components/campaign/HorizontalCampaignSuggestions';
 import CampaignEventEmitter from '../../contexts/CampaignEventEmitter';
+import TelebirrGiftModal from '../../components/gifts/TelebirrGiftModal';
+import SuccessModal from '../../components/common/SuccessModal';
 
 const { width, height } = Dimensions.get('window');
 const GOLD = '#8fc441';
@@ -431,16 +433,36 @@ const BoostSheet = React.memo(function BoostSheet({
   );
 });
 
-// Custom component for displaying images at original size without black spaces
+// Display image full width of the card without black space and without cutting/cropping the original image
 const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
   const [imageSize, setImageSize] = useState({ width: null, height: null });
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (imageUrl) {
+      Image.getSize(
+        imageUrl,
+        (w, h) => {
+          if (isMounted && w && h) {
+            setImageSize({ width: w, height: h });
+            setLoading(false);
+          }
+        },
+        () => {
+          if (isMounted) setLoading(false);
+        }
+      );
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [imageUrl]);
   
   const handleImageLoad = useCallback((e) => {
     const source = e?.nativeEvent?.source;
     const imgWidth = source?.width;
     const imgHeight = source?.height;
-    console.log('OriginalSizeImage loaded with dimensions:', { imgWidth, imgHeight });
     if (imgWidth && imgHeight) {
       setImageSize({ width: imgWidth, height: imgHeight });
     }
@@ -448,34 +470,33 @@ const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
   }, []);
   
   const handleImageError = useCallback((e) => {
-    console.log('OriginalSizeImage failed to load:', e.nativeEvent);
+    console.log('OriginalSizeImage failed to load:', e?.nativeEvent);
     setLoading(false);
   }, []);
   
-  // Calculate dynamic container size based on image aspect ratio
+  // Dynamic container matches image aspect ratio:
+  // Fills 100% of card width, has NO black space, and never crops the image
   const containerStyle = useMemo(() => {
     if (imageSize.width && imageSize.height) {
       return {
         width: '100%',
         aspectRatio: imageSize.width / imageSize.height,
-        backgroundColor: '#111',
       };
     }
     return {
       width: '100%',
-      height: 300, // Default height while loading
-      backgroundColor: '#111',
+      aspectRatio: 1, // Default 1:1 while loading
+      backgroundColor: '#1a1a1a',
     };
   }, [imageSize]);
   
   return (
-    <TouchableOpacity style={containerStyle} onPress={onPress} activeOpacity={0.95}>
+    <TouchableOpacity style={[containerStyle, style]} onPress={onPress} activeOpacity={0.95}>
       <Image
         source={{ uri: imageUrl }}
         style={{ 
           width: '100%', 
           height: '100%',
-          backgroundColor: '#111',
         }}
         resizeMode="cover"
         onError={handleImageError}
@@ -490,7 +511,7 @@ const OriginalSizeImage = React.memo(({ imageUrl, onPress, style }) => {
           bottom: 0, 
           justifyContent: 'center', 
           alignItems: 'center',
-          backgroundColor: '#111'
+          backgroundColor: '#1a1a1a'
         }}>
           <ActivityIndicator size="small" color={GOLD} />
         </View>
@@ -714,6 +735,19 @@ function ReportModal({ post, onClose, onSubmit }) {
   );
 }
 
+// Calculate dynamic suggestion positions based on Instagram-style algorithm
+function calculateSuggestionPositions(postCount) {
+  const positions = new Set();
+  if (postCount < 3) return positions;
+  
+  // Insert suggestions at random intervals (every 3-5 posts)
+  let position = 2 + Math.floor(Math.random() * 3);
+  while (position < postCount) {
+    positions.add(position);
+    position += 3 + Math.floor(Math.random() * 3);
+  }
+  return positions;
+}
 
 export default function HomeScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
@@ -747,6 +781,8 @@ export default function HomeScreen({ navigation, route }) {
   const [showPostInfoModal, setShowPostInfoModal] = useState(null);
   const [showBoostModal, setShowBoostModal] = useState(null);
   const [showGiftModal, setShowGiftModal] = useState(false);
+  const [giftSuccessModalVisible, setGiftSuccessModalVisible] = useState(false);
+  const [giftSuccessMessage, setGiftSuccessMessage] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [localShareCounts, setLocalShareCounts] = useState({}); // Track local share increments
   const [localGiftCounts, setLocalGiftCounts] = useState({}); // Track local gift count increments
@@ -919,6 +955,7 @@ export default function HomeScreen({ navigation, route }) {
         setPosts(filteredFinalResults);
         setHasMore(results.length >= LIMIT);
         setPage(0);
+        setLoading(false);
       });
       if (stale) {
         const results = Array.isArray(stale) ? stale : (stale.results || []);
@@ -992,34 +1029,6 @@ export default function HomeScreen({ navigation, route }) {
     }
   };
 
-  // Auto-claim daily login bonus on app open (once per day)
-  useEffect(() => {
-    const claimDailyBonus = async () => {
-      try {
-        // Check if we already tried today
-        const lastAttempt = await AsyncStorage.getItem('lastBonusAttempt');
-        const today = new Date().toDateString();
-        
-        if (lastAttempt === today) {
-          // Already tried today, skip
-          return;
-        }
-        
-        const response = await api.request('/gamification/login-bonus/', {
-          method: 'POST',
-        });
-        
-        // Mark as attempted today
-        await AsyncStorage.setItem('lastBonusAttempt', today);
-        console.log('Daily login bonus claimed:', response);
-      } catch (error) {
-        // Mark as attempted even on error to avoid repeated attempts
-        const today = new Date().toDateString();
-        await AsyncStorage.setItem('lastBonusAttempt', today);
-      }
-    };
-    claimDailyBonus();
-  }, []);
 
   useEffect(() => {
     const loadGifts = async () => {
@@ -1418,21 +1427,6 @@ export default function HomeScreen({ navigation, route }) {
     setActiveTab(tab);
   };
 
-  // Calculate dynamic suggestion positions based on Instagram-style algorithm
-  const calculateSuggestionPositions = (postCount) => {
-    const positions = new Set();
-    if (postCount < 3) return positions;
-    
-    // Insert suggestions at random intervals (every 3-5 posts)
-    // Instagram uses dynamic positioning based on user activity
-    let position = 2 + Math.floor(Math.random() * 3); // Start between 2-4
-    while (position < postCount) {
-      positions.add(position);
-      position += 3 + Math.floor(Math.random() * 3); // Add 3-5 posts between suggestions
-    }
-    
-    return positions;
-  };
 
   const copyPostLink = (post) => {
     const url = `https://uat.flipstar.et/post/${post.id}`;
@@ -1565,7 +1559,11 @@ export default function HomeScreen({ navigation, route }) {
     const newSaved = !post.is_saved;
     setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_saved: newSaved } : p));
     try {
-      await api.request(`/reels/${post.id}/save/`, { method: 'POST' });
+      if (api.toggleSavePost) {
+        await api.toggleSavePost(post.id);
+      } else {
+        await api.request(`/reels/${post.id}/save/`, { method: 'POST' });
+      }
     } catch {
       setPosts(prev => prev.map(p => p.id === post.id ? { ...p, is_saved: post.is_saved } : p));
     }
@@ -2855,137 +2853,29 @@ export default function HomeScreen({ navigation, route }) {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Gift Modal */}
-      <Modal
+      {/* Telebirr Gift Modal */}
+      <TelebirrGiftModal
         visible={showGiftModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowGiftModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowGiftModal(false)}
-        >
-          <TouchableOpacity style={styles.giftSheet} activeOpacity={1}>
-            <View style={styles.sheetHandle} />
-            <View style={styles.sheetHeader}>
-              <Text style={styles.sheetTitle}>🎁 Gift to @{giftRecipient}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.coinBalance}>🪙 {userCoins}</Text>
-                  <Text style={styles.coinLabel}>Purchased Coins</Text>
-                  <Text style={styles.giftLimitLabel}>{giftsSentToday}/{dailyGiftLimit} gifts today</Text>
-                </View>
-                <TouchableOpacity onPress={() => setShowGiftModal(false)}>
-                  <Ionicons name="close" size={24} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            </View>
+        onClose={() => setShowGiftModal(false)}
+        recipientUsername={giftRecipient || 'User'}
+        reelId={giftPost?.id || null}
+        onGiftSent={(giftData) => {
+          console.log('Gift sent from iOS HomeScreen:', giftData);
+          const giftName = giftData?.gift?.name || giftData?.gift?.amharicName || 'gift';
+          const rec = giftData?.recipient || giftRecipient || 'creator';
+          const qty = giftData?.quantity > 1 ? `${giftData.quantity}x ` : '';
+          setGiftSuccessMessage(`You have sent ${qty}${giftName} to @${rec} successfully! 🎉`);
+          setGiftSuccessModalVisible(true);
+        }}
+      />
 
-            {giftSent ? (
-              <View style={{ alignItems: 'center', padding: 32 }}>
-                <Text style={{ fontSize: 64, marginBottom: 12 }}>🎉</Text>
-                <Text style={{ fontSize: 20, fontWeight: '800', color: GOLD, marginBottom: 4 }}>Gift Sent!</Text>
-                <Text style={{ fontSize: 14, color: '#78716C', marginBottom: 24, textAlign: 'center' }}>
-                  Your gift has been sent successfully
-                </Text>
-                <TouchableOpacity
-                  style={styles.sendButton}
-                  onPress={() => setShowGiftModal(false)}
-                >
-                  <Text style={styles.sendButtonText}>Done 🎊</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-                {/* Category Filter */}
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.categoryFilter}
-                  contentContainerStyle={{ paddingHorizontal: 12 }}
-                >
-                  {['all', ...new Set(gifts.map(g => g.category))].map(cat => (
-                    <TouchableOpacity
-                      key={cat}
-                      style={[styles.categoryButton, selectedCategory === cat && styles.categoryButtonActive]}
-                      onPress={() => setSelectedCategory(cat)}
-                    >
-                      <Text style={[styles.categoryButtonText, selectedCategory === cat && styles.categoryButtonTextActive]}>
-                        {cat !== 'all' && CATEGORY_ICONS[cat]} {cat.charAt(0).toUpperCase() + cat.slice(1)}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-
-                {/* Gift Selection Grid */}
-                <View style={styles.giftGrid}>
-                  {(selectedCategory === 'all' ? gifts : gifts.filter(g => g.category === selectedCategory)).map(gift => (
-                    <TouchableOpacity
-                      key={gift.id}
-                      style={[styles.giftItem, selectedGift?.id === gift.id && styles.giftItemActive]}
-                      onPress={() => { setSelectedGift(gift); setGiftQuantity(1); }}
-                    >
-                      <Text style={styles.giftEmoji}>{gift.image_url ? '🎁' : (CATEGORY_ICONS[gift.category] || '🎁')}</Text>
-                      <Text style={styles.giftCoinValue}>{gift.coin_value}🪙</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* Selected Gift Info & Quantity */}
-                {selectedGift && (
-                  <View style={styles.selectedGiftContainer}>
-                    <Text style={styles.selectedGiftName}>{selectedGift.name}</Text>
-                    <View style={styles.quantitySelector}>
-                      <TouchableOpacity
-                        style={styles.quantityButton}
-                        onPress={() => setGiftQuantity(Math.max(1, giftQuantity - 1))}
-                      >
-                        <Text style={styles.quantityButtonText}>−</Text>
-                      </TouchableOpacity>
-                      <Text style={styles.quantityValue}>{giftQuantity}</Text>
-                      <TouchableOpacity
-                        style={styles.quantityButton}
-                        onPress={() => setGiftQuantity(giftQuantity + 1)}
-                      >
-                        <Text style={styles.quantityButtonText}>+</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )}
-
-                {/* Message Input */}
-                <Text style={styles.fieldLabel}>Message (optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Add a message..."
-                  placeholderTextColor="#666"
-                  value={giftMessage}
-                  onChangeText={setGiftMessage}
-                />
-
-                {giftError ? <Text style={styles.errorText}>{giftError}</Text> : null}
-
-                {/* Send Button */}
-                <TouchableOpacity
-                  style={[styles.sendButton, sendingGift && { opacity: 0.6 }]}
-                  onPress={sendGift}
-                  disabled={sendingGift || !selectedGift}
-                >
-                  {sendingGift ? (
-                    <ActivityIndicator size="small" color="#000" />
-                  ) : (
-                    <Text style={styles.sendButtonText}>
-                      Send Gift · 🪙 {selectedGift ? selectedGift.coin_value * giftQuantity : 0}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              </ScrollView>
-            )}
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+      {/* Gift Sent Success Popup Modal */}
+      <SuccessModal
+        visible={giftSuccessModalVisible}
+        onClose={() => setGiftSuccessModalVisible(false)}
+        title="You Sent Successfully!"
+        message={giftSuccessMessage}
+      />
 
       {/* Share Modal */}
       <Modal
@@ -3252,34 +3142,35 @@ const styles = StyleSheet.create({
   postCard: { 
     backgroundColor: CARD, 
     marginHorizontal: 8,
-    marginBottom: 16,
-    borderRadius: 16,
+    marginBottom: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: BORDER,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowRadius: 6,
+    elevation: 3,
   },
   postHeader: {
     flexDirection: 'row', 
-    alignItems: 'flex-start', 
+    alignItems: 'center', 
     justifyContent: 'space-between', 
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
   postUser: { flexDirection: 'row', alignItems: 'center', flex: 1, flexShrink: 1, marginRight: 10 },
   username: { fontSize: 14, fontWeight: '700', color: '#fff' },
   timeAgo: { fontSize: 12, color: LIGHT_GOLD, marginTop: 1 },
   postHeaderActions: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     flexShrink: 0,
   },
   campaignBadgeRow: {
     paddingHorizontal: 12,
-    paddingBottom: 10,
+    paddingBottom: 6,
   },
   campaignBadge: {
     flexDirection: 'row',
@@ -3287,7 +3178,7 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: 'rgba(143,196,65,0.13)',
     paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingVertical: 5,
     borderRadius: 10,
     borderWidth: 1.5,
     borderColor: GOLD,
@@ -3363,13 +3254,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: GOLD,
     backgroundColor: 'rgba(143,196,65,0.1)',
-    alignSelf: 'flex-start',
-    marginTop: 8,
+    alignSelf: 'center',
+    marginTop: 0,
   },
   postBoostNowText: {
     color: GOLD,
@@ -3381,11 +3272,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderRadius: 999,
     backgroundColor: GOLD,
-    alignSelf: 'flex-start',
-    marginTop: 8,
+    alignSelf: 'center',
+    marginTop: 0,
   },
   postBoostedBadgeText: {
     color: '#1A1A1A',
@@ -3411,12 +3302,12 @@ const styles = StyleSheet.create({
   // Caption
   captionContainer: {
     paddingHorizontal: 12,
-    paddingBottom: 6,
+    paddingBottom: 4,
   },
   caption: { 
-    fontSize: 14, 
+    fontSize: 13, 
     color: '#ddd', 
-    lineHeight: 18,
+    lineHeight: 17,
   },
   captionUsername: {
     fontWeight: '700',
@@ -3568,7 +3459,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
     justifyContent: 'space-between',
     paddingHorizontal: 12, 
-    paddingVertical: 10,
+    paddingVertical: 6,
   },
   leftActions: {
     flexDirection: 'row',
@@ -3599,7 +3490,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingBottom: 6,
+    paddingBottom: 4,
     gap: 8,
   },
   likedByAvatarsRow: {
@@ -3641,7 +3532,7 @@ const styles = StyleSheet.create({
   // Comments
   recentComments: {
     paddingHorizontal: 12,
-    paddingBottom: 4,
+    paddingBottom: 2,
   },
   recentComment: {
     fontSize: 12,
@@ -3656,7 +3547,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#fff',
     paddingHorizontal: 12,
-    paddingBottom: 8,
+    paddingBottom: 6,
     fontWeight: '600',
   },
   

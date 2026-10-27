@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, FlatList,
-  Image, ActivityIndicator, Dimensions, ScrollView,
+  ActivityIndicator, Dimensions, ScrollView,
   StatusBar, Alert, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,6 +10,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import CampaignEventEmitter from '../../contexts/CampaignEventEmitter';
+import OptimizedImage from '../../components/common/OptimizedImage';
+import { normalizeMediaUrl, generateThumbnailUrl } from '../../utils/mediaUtils';
 import api from '../../api';
 import config from '../../config';
 
@@ -103,12 +105,6 @@ const TIME_RANGES = [
 ];
 
 // Helper functions
-const mediaUrl = (url) => {
-  if (!url) return null;
-  if (url.startsWith('http')) return url;
-  return `${config.API_BASE_URL.replace('/api', '')}${url}`;
-};
-
 const fmt = (n) => {
   if (!n && n !== 0) return '0';
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -123,7 +119,7 @@ const Avatar = React.memo(function Avatar({ uri, size = 40, name = '' }) {
   
   if (uri && !err) {
     return (
-      <Image
+      <OptimizedImage
         source={{ uri }}
         style={{ 
           width: size, 
@@ -132,6 +128,8 @@ const Avatar = React.memo(function Avatar({ uri, size = 40, name = '' }) {
           borderWidth: 2,
           borderColor: GOLD
         }}
+        contentFit="cover"
+        cloudinaryOptions={{ width: size * 2, height: size * 2 }}
         onError={() => setErr(true)}
       />
     );
@@ -167,16 +165,16 @@ const VideoThumb = React.memo(function VideoThumb({ reel, rank, index = 0, hero 
   
   // Priority: 1) thumbnail, 2) image, 3) media, 4) file_url
   if (reel.thumbnail) {
-    thumb = mediaUrl(reel.thumbnail);
+    thumb = normalizeMediaUrl(reel.thumbnail);
   } else if (imageUrl) {
-    thumb = mediaUrl(imageUrl);
+    thumb = normalizeMediaUrl(imageUrl);
   } else if (videoUrl) {
-    thumb = mediaUrl(videoUrl);
+    thumb = normalizeMediaUrl(videoUrl);
   } else if (reel.file_url) {
-    thumb = mediaUrl(reel.file_url);
+    thumb = normalizeMediaUrl(reel.file_url);
   }
 
-  // If still no thumbnail, try to construct from common patterns
+  // If still no thumbnail, try to construct from common patterns or generate from video
   if (!thumb && reel.id) {
     thumb = `${config.API_BASE_URL.replace('/api', '')}/media/thumbnails/${reel.id}.jpg`;
   }
@@ -191,10 +189,11 @@ const VideoThumb = React.memo(function VideoThumb({ reel, rank, index = 0, hero 
       onPress={() => onOpen?.(reel)}
     >
       {thumb ? (
-        <Image
+        <OptimizedImage
           source={{ uri: thumb }}
           style={styles.gridImage}
-          resizeMode="cover"
+          contentFit="cover"
+          cloudinaryOptions={{ width: 300, height: 300 }}
         />
       ) : (
         <View style={[styles.gridImage, styles.fallbackContainer]}>
@@ -482,8 +481,16 @@ export default function ExploreScreen({ navigation, route }) {
     navigation.navigate('ReelsDetail', { initialVideoId: reel.id });
   }, [navigation]);
 
-  const openProfile = (userId) => {
-    navigation.navigate('ProfileStack', { userId });
+  const openProfile = (userOrId) => {
+    if (typeof userOrId === 'object' && userOrId !== null) {
+      navigation.navigate('ProfileStack', { 
+        userId: userOrId.id,
+        username: userOrId.username,
+        user: userOrId,
+      });
+    } else {
+      navigation.navigate('ProfileStack', { userId: userOrId });
+    }
   };
 
   const renderGridItem = useCallback(({ item, index }) => (
@@ -657,7 +664,7 @@ export default function ExploreScreen({ navigation, route }) {
                     {searchResults.users.map(u => (
                       <TouchableOpacity
                         key={u.id}
-                        onPress={() => openProfile(u.id)}
+                        onPress={() => openProfile(u)}
                         style={styles.userRow}
                       >
                         <Avatar uri={u.profile_photo} size={42} name={u.username} />
@@ -775,8 +782,11 @@ export default function ExploreScreen({ navigation, route }) {
               </View>
             ) : (
               <>
-                <View style={styles.grid}>
-                  {videos.map((reel, idx) => (
+                <FlatList
+                  data={videos}
+                  keyExtractor={(item, index) => item.id?.toString() || index.toString()}
+                  numColumns={3}
+                  renderItem={({ item: reel, index: idx }) => (
                     <VideoThumb
                       key={reel.id ?? idx}
                       reel={reel}
@@ -785,13 +795,26 @@ export default function ExploreScreen({ navigation, route }) {
                       hero={false}
                       onOpen={openReel}
                     />
-                  ))}
-                </View>
-                
-                {/* Silent load more - no indicators */}
-                {hasMore && !hashtagView && loadingMore && (
-                  <View style={{ height: 1 }} />
-                )}
+                  )}
+                  contentContainerStyle={styles.grid}
+                  showsVerticalScrollIndicator={false}
+                  removeClippedSubviews={true}
+                  maxToRenderPerBatch={12}
+                  windowSize={10}
+                  initialNumToRender={9}
+                  getItemLayout={(data, index) => ({
+                    length: (width - 16) / 3,
+                    offset: ((width - 16) / 3) * Math.floor(index / 3),
+                    index,
+                  })}
+                  onEndReached={loadMore}
+                  onEndReachedThreshold={0.1}
+                  ListFooterComponent={
+                    hasMore && !hashtagView && loadingMore ? (
+                      <View style={{ height: 1 }} />
+                    ) : null
+                  }
+                />
               </>
             )}
             

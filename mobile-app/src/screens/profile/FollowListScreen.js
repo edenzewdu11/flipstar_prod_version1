@@ -54,7 +54,7 @@ export default function FollowListScreen({ navigation, route }) {
 
   const renderItem = ({ item }) => (
     <View style={styles.row}>
-      <TouchableOpacity style={styles.userInfo} onPress={() => navigation.navigate('ProfileStack', { userId: item.id })}>
+      <TouchableOpacity style={styles.userInfo} onPress={() => navigation.navigate('ProfileStack', { userId: item.id, username: item.username, user: item })}>
         {item.profile_photo
           ? <Image source={{ uri: mediaUrl(item.profile_photo) }} style={styles.avatar} />
           : <View style={[styles.avatar, { backgroundColor: GOLD, justifyContent: 'center', alignItems: 'center' }]}>

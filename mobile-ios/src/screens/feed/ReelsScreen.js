@@ -15,6 +15,8 @@ import { useBlock } from '../../contexts/BlockContext';
 import api from '../../api';
 import config from '../../config';
 import SoundManager from '../../utils/SoundUtils';
+import TelebirrGiftModal from '../../components/gifts/TelebirrGiftModal';
+import SuccessModal from '../../components/common/SuccessModal';
 import InsufficientCoinsModal from '../../components/subscription/InsufficientCoinsModal';
 
 const MEDIA_BASE = config.API_BASE_URL.replace('/api', '');
@@ -27,6 +29,7 @@ const BG = '#0D0D0D';
 const CARD = '#1A1A1A';
 const LIGHT_GOLD = '#b5dd8f';
 const BORDER = '#262626';
+const MEDIA_BASE = (config.API_BASE_URL || '').replace(/\/api(\/v1)?\/?$/, '');
 
 // Helper to shuffle array for randomized feed
 const shuffleArray = (array) => {
@@ -161,6 +164,9 @@ const ReelItem = React.memo(function ReelItem({
   const videoUri = item.media
     ? (item.media.startsWith('http') ? item.media : `${MEDIA_BASE}${item.media}`)
     : null;
+  const imageUri = item.image
+    ? (item.image.startsWith('http') ? item.image : `${MEDIA_BASE}${item.image}`)
+    : (item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : `${MEDIA_BASE}${item.thumbnail}`) : null);
 
   // Check if this is a campaign post (matching website implementation)
   const isCampaignPost = !!(item.is_campaign_post || item.campaign_id || item.campaign);
@@ -297,7 +303,11 @@ const ReelItem = React.memo(function ReelItem({
     }
     
     try {
-      await api.request(`/reels/${item.id}/save/`, { method: 'POST' });
+      if (api.toggleSavePost) {
+        await api.toggleSavePost(item.id);
+      } else {
+        await api.request(`/reels/${item.id}/save/`, { method: 'POST' });
+      }
     } catch (error) {
       // Revert on error
       if (setVideos) {
@@ -639,6 +649,12 @@ const ReelItem = React.memo(function ReelItem({
             style={StyleSheet.absoluteFill}
             contentFit="cover"
             nativeControls={false}
+          />
+        ) : imageUri ? (
+          <Image
+            source={{ uri: imageUri }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="contain"
           />
         ) : (
           <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -1369,7 +1385,8 @@ export default function ReelsScreen({ navigation, route }) {
   const auth = useAuth();
   const { filterBlockedUsers } = useBlock();
   const user = auth?.user ?? null;
-  const LIMIT = 10;
+  const LIMIT = 30;
+  const backendOffsetRef = useRef(0);
   const initialVideoId = route?.params?.initialVideoId || route?.params?.id || route?.params?.initialReel?.id;
   const initialReel = route?.params?.initialReel || null;
   const fromDeepLink = route?.params?.fromDeepLink;
@@ -1404,6 +1421,8 @@ export default function ReelsScreen({ navigation, route }) {
   const [followStates, setFollowStates] = useState({});
   const [showGiftModal, setShowGiftModal] = useState(false);
   const [giftRecipient, setGiftRecipient] = useState('');
+  const [giftSuccessModalVisible, setGiftSuccessModalVisible] = useState(false);
+  const [giftSuccessMessage, setGiftSuccessMessage] = useState('');
   const [giftMessage, setGiftMessage] = useState('');
   const [sendingGift, setSendingGift] = useState(false);
   const [giftSent, setGiftSent] = useState(null);
@@ -1744,6 +1763,7 @@ export default function ReelsScreen({ navigation, route }) {
       // Then fetch fresh data in background
       const stale = api.requestStale(endpoint, (fresh) => {
         let results = Array.isArray(fresh) ? fresh : (fresh.results || []);
+        backendOffsetRef.current = results.length;
         
         // Only show video content in reels
         const filteredResults = results.filter(reel => reel && reel.media);
@@ -1770,16 +1790,22 @@ export default function ReelsScreen({ navigation, route }) {
         const mergedReels = mergeInitialReel(filteredShuffledResults);
         setReels(mergedReels);
         setActiveIndex(0);
-        setHasMore(filteredResults.length === LIMIT);
+        const hasMoreBackend = Boolean(fresh?.next) || results.length >= LIMIT;
+        setHasMore(hasMoreBackend);
         
         // Persist fresh data so next load is instant
         if (filteredResults.length > 0) {
           writeFeedCache(activeTab, filteredResults);
         }
+
+        // If very few videos found and backend has more, fetch next batch to ensure scrollable feed
+        if (filteredShuffledResults.length < 5 && hasMoreBackend) {
+          fetchReels(false);
+        }
       });
       
       if (!cached && (!initialVideoId || initialReelRef.current)) {
-        fetchReels(0, true);
+        fetchReels(true);
       }
     };
     
@@ -1790,10 +1816,10 @@ export default function ReelsScreen({ navigation, route }) {
   useEffect(() => {
     // Don't override specific video when navigating from a shared link
     if (initialVideoId) return;
-    fetchReels(0, true);
+    fetchReels(true);
   }, [filterBlockedUsers]);
 
-  const fetchReels = async (offset = 0, reset = false) => {
+  const fetchReels = async (reset = false) => {
     // Don't override a dedicated shared-link reel view.
     if (reset && initialVideoId && fromDeepLink) return;
     if (initialVideoId && !initialReelRef.current) return;
@@ -1801,43 +1827,65 @@ export default function ReelsScreen({ navigation, route }) {
     fetchReelsRef.current = true;
     try {
       if (reset) {
+        backendOffsetRef.current = 0;
         if (!initialReelRef.current) setLoading(true);
       } else {
         setLoadingMore(true);
       }
       
-      let endpoint = activeTab === 'following'
-        ? `/reels/following/?limit=${LIMIT}&offset=${offset}`
-        : `/reels/?limit=${LIMIT}&offset=${offset}`;
-      
-      const data = await api.request(endpoint);
-      let results = Array.isArray(data) ? data : (data.results || []);
-      
-      // Only show video content in reels
-      const filteredResults = results.filter(reel => reel && reel.media);
-      
-      // Always shuffle for normal feed loading
-      const shuffledResults = shuffleArray(filteredResults);
+      let currentOffset = backendOffsetRef.current;
+      let accumulatedVideos = [];
+      let backendHasMore = true;
+      let iterations = 0;
+
+      // Scan up to 3 batches if needed until we collect at least a few videos
+      while (iterations < 3 && backendHasMore) {
+        iterations++;
+        const endpoint = activeTab === 'following'
+          ? `/reels/following/?limit=${LIMIT}&offset=${currentOffset}`
+          : `/reels/?limit=${LIMIT}&offset=${currentOffset}`;
+        
+        const data = await api.request(endpoint);
+        const results = Array.isArray(data) ? data : (data.results || []);
+        currentOffset += results.length;
+        backendOffsetRef.current = currentOffset;
+        backendHasMore = Boolean(data?.next) || results.length >= LIMIT;
+
+        // Only show video content in reels
+        const filteredResults = results.filter(reel => reel && reel.media);
+        accumulatedVideos.push(...filteredResults);
+
+        if (accumulatedVideos.length >= 3 || !backendHasMore || results.length === 0) {
+          break;
+        }
+      }
+
       // Preserve local share counts and filter blocked users
+      const shuffledResults = shuffleArray(accumulatedVideos);
       const updatedShuffledResults = shuffledResults.map(reel => ({
         ...reel,
         shares: (reel.shares || 0) + (localShareCounts[reel.id] || 0)
       }));
-      // Filter out reels from blocked users
       const filteredShuffledResults = filterBlockedUsers(updatedShuffledResults);
-      const nextResults = reset ? mergeInitialReel(filteredShuffledResults) : filteredShuffledResults;
-      setReels(prev => reset ? nextResults : [...prev, ...filteredShuffledResults]);
+
       if (reset) {
-        // If we have a specific video, find its index and set it as active
+        const nextResults = mergeInitialReel(filteredShuffledResults);
+        setReels(nextResults);
         if (initialVideoId && initialReelRef.current) {
           const targetIndex = nextResults.findIndex(reel => reel.id === initialVideoId);
           setActiveIndex(targetIndex >= 0 ? targetIndex : 0);
         } else {
           setActiveIndex(0);
         }
+      } else {
+        setReels(prev => {
+          const existingIds = new Set(prev.map(r => String(r.id)));
+          const uniqueNew = filteredShuffledResults.filter(r => !existingIds.has(String(r.id)));
+          return [...prev, ...uniqueNew];
+        });
       }
       
-      setHasMore(filteredResults.length >= LIMIT);
+      setHasMore(backendHasMore);
     } catch (e) { 
       console.error('Reels error:', e); 
     } finally { 
@@ -1862,7 +1910,7 @@ export default function ReelsScreen({ navigation, route }) {
 
   const onEndReached = () => {
     if (!fetchReelsRef.current && !loadingMore && hasMore) {
-      fetchReels(reels.length, false);
+      fetchReels(false);
     }
   };
 
@@ -1872,7 +1920,8 @@ export default function ReelsScreen({ navigation, route }) {
     try {
       // Clear cache and fetch fresh data
       try { await AsyncStorage.removeItem(CACHE_KEY(activeTab)); } catch {}
-      await fetchReels(0, true);
+      backendOffsetRef.current = 0;
+      await fetchReels(true);
     } catch (error) {
       console.error('Refresh error:', error);
     } finally {
@@ -2165,176 +2214,32 @@ export default function ReelsScreen({ navigation, route }) {
         </Modal>
       )}
 
-      {/* Gift Modal */}
-      <Modal
+      {/* Telebirr Gift Modal */}
+      <TelebirrGiftModal
         visible={showGiftModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowGiftModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowGiftModal(false)}
-        >
-          <TouchableOpacity style={styles.giftSheet} activeOpacity={1}>
-            <View style={styles.sheetHandle} />
-            <View style={styles.sheetHeader}>
-              <Text style={styles.sheetTitle}>🎁 Gift to @{giftRecipient}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.coinBalance}>🪙 {userCoins}</Text>
-                  <Text style={styles.coinLabel}>Purchased Coins</Text>
-                  <Text style={styles.giftLimitLabel}>{giftsSentToday}/{dailyGiftLimit} gifts today</Text>
-                </View>
-                <TouchableOpacity onPress={() => setShowGiftModal(false)}>
-                  <Ionicons name="close" size={24} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            </View>
+        onClose={() => setShowGiftModal(false)}
+        recipientUsername={giftRecipient || 'User'}
+        reelId={currentReel?.id || null}
+        onGiftSent={(giftData) => {
+          console.log('Gift sent successfully from iOS Reels:', giftData);
+          if (currentReel) {
+            setReels(prev => prev.map(r => r.id === currentReel.id ? { ...r, gifts_count: (r.gifts_count || 0) + 1 } : r));
+          }
+          const giftName = giftData?.gift?.name || giftData?.gift?.amharicName || 'gift';
+          const rec = giftData?.recipient || giftRecipient || 'creator';
+          const qty = giftData?.quantity > 1 ? `${giftData.quantity}x ` : '';
+          setGiftSuccessMessage(`You have sent ${qty}${giftName} to @${rec} successfully! 🎉`);
+          setGiftSuccessModalVisible(true);
+        }}
+      />
 
-            {giftSent ? (
-              <View style={{ alignItems: 'center', padding: 32 }}>
-                <Text style={{ fontSize: 64, marginBottom: 12 }}>🎉</Text>
-                <Text style={{ fontSize: 20, fontWeight: '800', color: GOLD, marginBottom: 4 }}>Gift Sent!</Text>
-                <Text style={{ fontSize: 14, color: '#78716C', marginBottom: 24, textAlign: 'center' }}>
-                  Your gift has been sent successfully
-                </Text>
-                <TouchableOpacity
-                  style={styles.sendButton}
-                  onPress={() => setShowGiftModal(false)}
-                >
-                  <Text style={styles.sendButtonText}>Done 🎊</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={{ padding: 20 }}>
-                  {/* Gift Selection */}
-                  <View style={{ marginBottom: 20 }}>
-                    <Text style={{ fontSize: 16, fontWeight: '700', color: '#fff', marginBottom: 12 }}>Select a Gift</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                      {gifts.map((gift) => (
-                        <TouchableOpacity
-                          key={gift.id}
-                          style={[
-                            { 
-                              alignItems: 'center', 
-                              marginRight: 15, 
-                              padding: 10,
-                              borderRadius: 12,
-                              borderWidth: 2,
-                              borderColor: selectedGift?.id === gift.id ? GOLD : '#333',
-                              backgroundColor: selectedGift?.id === gift.id ? 'rgba(200, 181, 106, 0.1)' : 'transparent'
-                            }
-                          ]}
-                          onPress={() => setSelectedGift(gift)}
-                        >
-                          <Text style={{ fontSize: 32, marginBottom: 4 }}>{gift.emoji || '🎁'}</Text>
-                          <Text style={{ fontSize: 12, color: '#aaa', textAlign: 'center' }}>{gift.name}</Text>
-                          <Text style={{ fontSize: 12, fontWeight: '700', color: GOLD, marginTop: 2 }}>
-                            {gift.coin_cost} 🪙
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
-                  </View>
-
-                  {/* Quantity Selector */}
-                  {selectedGift && (
-                    <View style={{ marginBottom: 20 }}>
-                      <Text style={{ fontSize: 16, fontWeight: '700', color: '#fff', marginBottom: 12 }}>Quantity</Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 15 }}>
-                        <TouchableOpacity
-                          style={{ 
-                            width: 36, height: 36, borderRadius: 18, 
-                            backgroundColor: '#333', justifyContent: 'center', alignItems: 'center' 
-                          }}
-                          onPress={() => setGiftQuantity(Math.max(1, giftQuantity - 1))}
-                        >
-                          <Text style={{ color: '#fff', fontSize: 18 }}>-</Text>
-                        </TouchableOpacity>
-                        <Text style={{ fontSize: 18, fontWeight: '700', color: '#fff', minWidth: 40, textAlign: 'center' }}>
-                          {giftQuantity}
-                        </Text>
-                        <TouchableOpacity
-                          style={{ 
-                            width: 36, height: 36, borderRadius: 18, 
-                            backgroundColor: '#333', justifyContent: 'center', alignItems: 'center' 
-                          }}
-                          onPress={() => setGiftQuantity(Math.min(99, giftQuantity + 1))}
-                        >
-                          <Text style={{ color: '#fff', fontSize: 18 }}>+</Text>
-                        </TouchableOpacity>
-                        <View style={{ marginLeft: 10 }}>
-                          <Text style={{ fontSize: 14, color: GOLD, fontWeight: '700' }}>
-                            Total: {selectedGift.coin_cost * giftQuantity} 🪙
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                  )}
-
-                  {/* Message Input */}
-                  <View style={{ marginBottom: 20 }}>
-                    <Text style={{ fontSize: 16, fontWeight: '700', color: '#fff', marginBottom: 12 }}>Message (Optional)</Text>
-                    <TextInput
-                      style={{
-                        backgroundColor: '#1A1A1A',
-                        borderRadius: 10,
-                        padding: 12,
-                        color: '#fff',
-                        borderWidth: 1,
-                        borderColor: '#333',
-                        minHeight: 60,
-                        textAlignVertical: 'top'
-                      }}
-                      placeholder="Add a message..."
-                      placeholderTextColor="#666"
-                      value={giftMessage}
-                      onChangeText={setGiftMessage}
-                      multiline
-                      maxLength={100}
-                    />
-                  </View>
-
-                  {/* Error Display */}
-                  {giftError ? (
-                    <View style={{ 
-                      backgroundColor: '#2D1010', 
-                      borderWidth: 1, 
-                      borderColor: '#EF4444', 
-                      borderRadius: 8, 
-                      padding: 10, 
-                      marginBottom: 16 
-                    }}>
-                      <Text style={{ color: '#EF4444', fontSize: 13, fontWeight: '600' }}>
-                        ⚠️ {giftError}
-                      </Text>
-                    </View>
-                  ) : null}
-
-                  {/* Send Button */}
-                  <TouchableOpacity
-                    style={[
-                      styles.sendButton,
-                      (!selectedGift || sendingGift) && { backgroundColor: '#444' }
-                    ]}
-                    onPress={sendGift}
-                    disabled={!selectedGift || sendingGift}
-                  >
-                    {sendingGift ? (
-                      <ActivityIndicator size="small" color="#000" />
-                    ) : (
-                      <Text style={styles.sendButtonText}>
-                        Send Gift 🎁 {selectedGift && `(${selectedGift.coin_cost * giftQuantity} 🪙)`}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-            )}
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+      {/* Gift Sent Success Popup Modal */}
+      <SuccessModal
+        visible={giftSuccessModalVisible}
+        onClose={() => setGiftSuccessModalVisible(false)}
+        title="You Sent Successfully!"
+        message={giftSuccessMessage}
+      />
 
       
       

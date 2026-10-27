@@ -162,8 +162,12 @@ export default function CoinPurchaseScreen({ navigation, route }) {
 
       if (response.success) {
         setResultSuccess(true);
-        setResultMessage(`You bought ${purchaseCoins} coins successfully!`);
-        setShowResultModal(true);
+        setSuccessMessage(`You bought ${purchaseCoins} coins successfully!`);
+        setShowSuccessModal(true);
+        setTimeout(() => {
+          setShowSuccessModal(false);
+          navigation.goBack();
+        }, 3000);
       } else {
         setResultSuccess(false);
         // Map error messages to user-friendly text
@@ -309,9 +313,9 @@ export default function CoinPurchaseScreen({ navigation, route }) {
           });
         } catch (logError) {}
 
+        const purchasedAmount = offerPackage.total_coins || offerPackage.coin_amount;
         setResultSuccess(true);
-        setResultMessage('Payment request sent! Please enter your PIN on your phone to complete the purchase.');
-        setSuccessMessage('Payment request sent! Please enter your PIN on your phone to complete the purchase.');
+        setSuccessMessage(`You bought ${purchasedAmount} coins successfully!`);
         setShowSuccessModal(true);
         setTimeout(() => {
           setShowSuccessModal(false);

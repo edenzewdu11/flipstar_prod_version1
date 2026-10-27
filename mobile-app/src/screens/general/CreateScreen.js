@@ -300,15 +300,11 @@ export default function CreateScreen({ navigation, route }) {
       return;
     }
 
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission Required', 'Please allow access to your photo library.');
-      return;
-    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
       allowsEditing: false,
       quality: 0.88,
+      selectionLimit: 1,
     });
     if (!result.canceled && result.assets?.length) {
       const asset = result.assets[0];
@@ -463,15 +459,11 @@ export default function CreateScreen({ navigation, route }) {
   const resumePendingAction = async (action) => {
     setPendingAction(null);
     if (action === 'library') {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Please allow access to your photo library.');
-        return;
-      }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
         allowsEditing: false,
         quality: 0.88,
+        selectionLimit: 1,
       });
       if (!result.canceled && result.assets?.length) {
         const asset = result.assets[0];

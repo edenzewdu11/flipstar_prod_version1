@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../contexts/AuthContext';
 import api from '../../api';
 import { sanitizeErrorMessage } from '../../utils/errorMessage';
+import SuccessModal from '../../components/common/SuccessModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = Math.min(SCREEN_WIDTH - 32, 440);
@@ -60,6 +61,8 @@ export default function SubscriptionRegisterModal({
   const [resendingOtp, setResendingOtp] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
   const [loginLoading, setLoginLoading] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [pendingAuthResult, setPendingAuthResult] = useState(null);
 
   const otpInputsRef = useRef([]);
   const timerRef = useRef(null);
@@ -67,6 +70,8 @@ export default function SubscriptionRegisterModal({
   // Initialize modal state on open
   useEffect(() => {
     if (visible) {
+      setShowSuccessModal(false);
+      setPendingAuthResult(null);
       setErrorMsg('');
       setServerMessage('');
       setStep('phone');
@@ -389,12 +394,9 @@ export default function SubscriptionRegisterModal({
       if (res?.token) {
         await api.setAuthToken(res.token);
       }
-      if (res?.user && setUser) {
-        setUser(res.user);
-      }
 
-      onSuccess && onSuccess(res);
-      handleDismiss();
+      setPendingAuthResult(res);
+      setShowSuccessModal(true);
     } catch (err) {
       const msg = err?.data?.error || err?.message || 'Login failed. Please check your OTP and try again.';
       setErrorMsg(msg);
@@ -403,13 +405,23 @@ export default function SubscriptionRegisterModal({
     }
   };
 
+  const handleSuccessModalClose = () => {
+    setShowSuccessModal(false);
+    if (pendingAuthResult?.user && setUser) {
+      setUser(pendingAuthResult.user);
+    }
+    onSuccess && onSuccess(pendingAuthResult);
+    handleDismiss();
+  };
+
   const handleDismiss = () => {
     if (onClose) onClose();
     else if (onBackToLogin) onBackToLogin();
   };
 
   return (
-    <Modal visible={visible} animationType="fade" transparent onRequestClose={handleDismiss}>
+    <>
+      <Modal visible={visible && !showSuccessModal} animationType="fade" transparent onRequestClose={handleDismiss}>
       <StatusBar barStyle="light-content" backgroundColor="rgba(0,0,0,0.85)" />
       <KeyboardAvoidingView
         style={styles.overlay}
@@ -692,6 +704,15 @@ export default function SubscriptionRegisterModal({
         </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
+
+    {/* Successfully Subscribed Popup */}
+    <SuccessModal
+      visible={showSuccessModal}
+      onClose={handleSuccessModalClose}
+      title="You're Successfully Subscribed! 🎉"
+      message="Your registration is complete and your subscription is active. Welcome to FlipStar!"
+    />
+    </>
   );
 }
 

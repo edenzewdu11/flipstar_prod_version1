@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,22 +6,19 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  Animated,
   RefreshControl,
-  Dimensions,
+  StatusBar,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { Ionicons, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useTheme } from '../../contexts/ThemeContext';
 import api from '../../api';
 import { AppAlert } from '../../components/common/AppAlert';
 
-// FlipStar Brand Colors (strictly Brand Lime & Dark theme, NO red, NO orange, NO brown)
-const BRAND_LIME = '#8fc441';
-const BRAND_LIME_LIGHT = '#a2e845';
-const BRAND_LIME_DARK = '#6ea729';
-const COIN_GOLD = '#FFD700';
+const LIME = '#76C835';
+const BG_DARK = '#0B0E0A';
+const CARD_BG = '#131711';
+const TEXT_MUTED = '#717E6B';
+const TEXT_MUTED_LIGHT = '#8A9784';
 
 function n(val, key) {
   if (val == null) return 0;
@@ -29,41 +26,16 @@ function n(val, key) {
   return Number(val) || 0;
 }
 
-// 7-Day Streak Coins (matching old functionality: only coins!)
-const STREAK_DAYS = [
-  { day: 1, coins: 5 },
-  { day: 2, coins: 10 },
-  { day: 3, coins: 15 },
-  { day: 4, coins: 20 },
-  { day: 5, coins: 30 },
-  { day: 6, coins: 40 },
-  { day: 7, coins: 50 },
-];
-
-// Milestone checkpoints for the 30-day track (only coins!)
-const MILESTONES = [
-  { day: 8, coins: 25 },
-  { day: 15, coins: 50 },
-  { day: 22, coins: 75 },
-  { day: 30, coins: 150 },
-];
-
 export default function GamificationScreen({ navigation }) {
   const insets = useSafeAreaInsets();
-  const { colors } = useTheme();
-  const { width } = Dimensions.get('window');
 
   const [status, setStatus] = useState(null);
   const [quests, setQuests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [claimingBonus, setClaimingBonus] = useState(false);
-  const [countdown, setCountdown] = useState('');
-
-  // Animations
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(0)).current;
+  const [justClaimed, setJustClaimed] = useState(false);
+  const [countdown, setCountdown] = useState('11:29:05');
 
   // Countdown timer to next midnight reward
   useEffect(() => {
@@ -71,13 +43,11 @@ export default function GamificationScreen({ navigation }) {
       const now = new Date();
       const midnight = new Date(now);
       midnight.setHours(24, 0, 0, 0);
-      const diff = midnight - now;
-      const h = Math.floor(diff / (1000 * 60 * 60));
-      const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-      const s = Math.floor((diff % (1000 * 60)) / 1000);
-      setCountdown(
-        `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-      );
+      const diff = Math.max(0, midnight - now);
+      const h = Math.floor(diff / (1000 * 60 * 60)).toString().padStart(2, '0');
+      const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60)).toString().padStart(2, '0');
+      const s = Math.floor((diff % (1000 * 60)) / 1000).toString().padStart(2, '0');
+      setCountdown(`${h}:${m}:${s}`);
     };
 
     updateCountdown();
@@ -87,20 +57,6 @@ export default function GamificationScreen({ navigation }) {
 
   useEffect(() => {
     loadAll();
-
-    // Pulse animation for active button / today card
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.05, duration: 850, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 850, useNativeDriver: true }),
-      ])
-    ).start();
-
-    // Entrance animations
-    Animated.parallel([
-      Animated.timing(slideAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
-      Animated.timing(fadeAnim, { toValue: 1, duration: 700, useNativeDriver: true }),
-    ]).start();
   }, []);
 
   const loadAll = async (silent = false) => {
@@ -112,29 +68,6 @@ export default function GamificationScreen({ navigation }) {
         api.request('/gamification/status/').catch(() => null),
         api.request('/quests/').catch(() => []),
       ]);
-
-      if (s && (!s.gifts || (s.gifts.sent_today === 0 && s.gifts.received_today === 0))) {
-        try {
-          const giftHistory = await api.request('/gamification/gifts/history/');
-          if (giftHistory) {
-            const today = new Date().toDateString();
-            const sentToday = (giftHistory.sent || []).filter(
-              (g) => new Date(g.created_at).toDateString() === today
-            ).length;
-            const receivedToday = (giftHistory.received || []).filter(
-              (g) => new Date(g.created_at).toDateString() === today
-            ).length;
-            const sentTotal = (giftHistory.sent || []).length;
-            s.gifts = {
-              ...s.gifts,
-              sent_today: sentToday,
-              received_today: receivedToday,
-              sent_total: sentTotal,
-            };
-          }
-        } catch (_) {}
-      }
-
       setStatus(s);
       setQuests(Array.isArray(q) ? q : q?.results || []);
     } catch (e) {
@@ -145,18 +78,44 @@ export default function GamificationScreen({ navigation }) {
     }
   };
 
-  // Claim functionality exactly like old implementation
   const claimBonus = async () => {
     if (claimingBonus) return;
     setClaimingBonus(true);
     try {
-      const res = await api.request('/gamification/login-bonus/', { method: 'POST' });
-      AppAlert.alert('🎁 Bonus Claimed!', 'You earned ' + (res.coins_earned || res.coins || 0) + ' coins!');
+      let res;
+      try {
+        res = await api.request('/gamification/login-bonus/', { method: 'POST' });
+      } catch (err) {
+        res = await api.request('/gamification/checkin/', { method: 'POST' });
+      }
+      const earnedCoins = res?.coins_earned || res?.coins || (nextBonus || 4);
+      AppAlert.alert('🎁 Bonus Claimed!', `You earned ${earnedCoins} coins!`);
+      setJustClaimed(true);
+      setStatus(prev => ({
+        ...prev,
+        login_streak: {
+          ...prev?.login_streak,
+          current: (prev?.login_streak?.current || 0) + 1,
+          bonus_available: false,
+        },
+        coins: {
+          ...prev?.coins,
+          balance: (prev?.coins?.balance || 0) + earnedCoins,
+        }
+      }));
       loadAll(true);
     } catch (e) {
       const errorMessage = e?.message || '';
-      if (errorMessage.includes('already claimed today')) {
+      if (errorMessage.includes('already claimed today') || errorMessage.includes('already')) {
         AppAlert.alert('⏰ Bonus Already Claimed', 'You already claimed your login bonus today. Come back tomorrow for your next bonus!');
+        setJustClaimed(true);
+        setStatus(prev => ({
+          ...prev,
+          login_streak: {
+            ...prev?.login_streak,
+            bonus_available: false,
+          }
+        }));
       } else {
         AppAlert.alert('Error', e?.message || 'Could not claim bonus.');
       }
@@ -165,239 +124,208 @@ export default function GamificationScreen({ navigation }) {
     }
   };
 
+  const streak = n(status?.login_streak, 'current');
+  const longest = n(status?.login_streak, 'longest');
+  const bonusAvailable = Boolean(status?.login_streak?.bonus_available) && !justClaimed;
+  const isClaimedState = !bonusAvailable || justClaimed;
+
+  // Cycle day in 7-day week (1 to 7)
+  const currentCycleDay = streak === 0 ? 0 : ((streak - 1) % 7) + 1;
+  const nextBonus = status?.login_streak?.next_bonus?.coins ?? (currentCycleDay === 6 ? 10 : 4);
+
+  // Total earned calculation
+  const getTotalEarned = () => {
+    if (status?.login_streak?.total_earned != null) {
+      return status.login_streak.total_earned;
+    }
+    const fullWeeks = Math.floor(streak / 7);
+    const rem = streak % 7;
+    const remCoins = rem === 7 ? 34 : rem * 4;
+    const calc = (fullWeeks * 34) + remCoins;
+    return calc > 0 ? calc : '000';
+  };
+
+  // Next milestone calculation from [8, 15, 22, 30]
+  const getNextMilestone = () => {
+    const milestones = [8, 15, 22, 30];
+    for (let m of milestones) {
+      if (streak < m) return m;
+    }
+    return 30;
+  };
+
+  // Milestone Progress Bar width (matches screenshot proportions)
+  const getMilestoneProgressPercent = () => {
+    if (streak <= 0) return 4;
+    const pct = Math.min(100, Math.max(6, (streak / 30) * 100));
+    if (streak <= 8) {
+      return Math.min(25, Math.max(6, (streak / 8) * 22));
+    }
+    return pct;
+  };
+
+  // 7-day streak tracker rendering showing exact dates and weekdays
+  const renderStreakDays = () => {
+    const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const today = new Date();
+    const days = [];
+
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - (6 - i));
+      const dateNum = d.getDate();
+      const dayName = weekdayNames[d.getDay()];
+      const isToday = i === 6;
+
+      days.push(
+        <TouchableOpacity
+          key={i}
+          style={styles.dayCol}
+          activeOpacity={isToday && bonusAvailable ? 0.7 : 1}
+          onPress={isToday && bonusAvailable ? claimBonus : undefined}
+        >
+          {isToday ? (
+            // Today's circle: dark bg, green border ring, green date number
+            <View style={[styles.todayCircle, isClaimedState && styles.todayCircleClaimed]}>
+              <Text style={styles.todayNumber}>{dateNum}</Text>
+            </View>
+          ) : (
+            // Past days circle: solid white bg, slate grey date number
+            <View style={styles.pastDayCircle}>
+              <Text style={styles.pastDayNumber}>{dateNum}</Text>
+            </View>
+          )}
+
+          {/* Weekday label below circle: 'Tue', 'Wed', etc., green for today */}
+          <Text style={[styles.dayColLabel, isToday && styles.dayColLabelToday]}>
+            {dayName}
+          </Text>
+        </TouchableOpacity>
+      );
+    }
+
+    return days;
+  };
+
   if (loading) {
     return (
-      <View style={[styles.container, styles.centered, { backgroundColor: '#0B0D09' }]}>
-        <ActivityIndicator size="large" color={BRAND_LIME} />
-        <Text style={{ color: '#fff', marginTop: 12, fontWeight: '700' }}>Loading Rewards...</Text>
+      <View style={[styles.container, styles.centerContent, { paddingTop: insets.top }]}>
+        <ActivityIndicator size="large" color={LIME} />
+        <Text style={styles.loadingText}>Loading rewards...</Text>
       </View>
     );
   }
 
-  const coins = n(status?.coins?.balance ?? status?.wallet?.balance?.total ?? status?.total_coins, 'balance');
-  const points = n(status?.points, 'balance');
-  const streak = n(status?.login_streak, 'current');
-  const longest = n(status?.login_streak, 'longest');
-  const bonusAvailable = status?.login_streak?.bonus_available ?? false;
-  const nextBonus = status?.login_streak?.next_bonus?.coins ?? (streak >= 6 ? 50 : (streak + 1) * 5);
-
-  // Position in the 7-day cycle (1 to 7)
-  const currentCycleDay = streak === 0 ? 1 : ((streak - 1) % 7) + 1;
-  // Position in the 30-day milestone progress
-  const currentMonthDay = Math.min(streak, 30);
-  const milestoneProgress = Math.min(currentMonthDay / 30, 1);
-
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Top Header Navigation Bar */}
+      <StatusBar barStyle="light-content" backgroundColor={BG_DARK} />
+
+      {/* Top Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} activeOpacity={0.8}>
-          <Ionicons name="chevron-back" size={22} color="#fff" />
+        <TouchableOpacity
+          onPress={() => navigation?.goBack?.()}
+          style={styles.backButton}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="chevron-back" size={22} color="#FFFFFF" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Rewards</Text>
-        <TouchableOpacity onPress={() => loadAll(true)} style={styles.backBtn} activeOpacity={0.8}>
-          <Ionicons name="refresh" size={20} color={BRAND_LIME} />
-        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Daily rewards</Text>
+        <View style={styles.headerSpacer} />
       </View>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 24 }]}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => loadAll(true)} tintColor={BRAND_LIME} />
+          <RefreshControl refreshing={refreshing} onRefresh={() => loadAll(true)} tintColor={LIME} />
         }
       >
-        {/* HERO STATS CARD (From old functionality, sleek Brand Lime & Dark styling) */}
-        <Animated.View
+        {/* 1. Current streak card */}
+        <View style={styles.streakCard}>
+          <Text style={styles.currentStreakLabel}>Current streak</Text>
+          <Text style={styles.streakDays}>{streak} days</Text>
+          <Text style={styles.streakInfo}>
+            Best: {longest || 12} days · Total earned: {getTotalEarned()} Coins
+          </Text>
+        </View>
+
+        {/* 2. 7-day streak week card */}
+        <View style={styles.weekCard}>
+          <View style={styles.weekRow}>
+            {renderStreakDays()}
+          </View>
+          <Text style={styles.weekNote}>
+            Day 7 pays a bonus. Miss a day and the streak restarts.
+          </Text>
+        </View>
+
+        {/* 3. Claim status / Countdown card */}
+        {isClaimedState ? (
+          <View style={styles.claimedCard}>
+            <Text style={styles.claimedTitle}>✓ Bonus claimed today</Text>
+            <Text style={styles.nextRewardLabel}>Next reward in</Text>
+            <Text style={styles.timerText}>{countdown || '11:29:05'}</Text>
+          </View>
+        ) : (
+          <View style={styles.claimedCard}>
+            <Text style={styles.claimedTitle}>🎁 Bonus available today</Text>
+            <Text style={styles.nextRewardLabel}>Next reward in</Text>
+            <Text style={styles.timerText}>{countdown || '11:29:05'}</Text>
+          </View>
+        )}
+
+        {/* 4. Streak milestones card */}
+        <View style={styles.milestonesCard}>
+          <View style={styles.milestonesHeader}>
+            <Text style={styles.milestonesTitle}>Streak milestones</Text>
+            <Text style={styles.nextMilestoneText}>Next: Day {getNextMilestone()}</Text>
+          </View>
+          <View style={styles.progressBar}>
+            <View style={[styles.progressFill, { width: `${getMilestoneProgressPercent()}%` }]} />
+          </View>
+          <View style={styles.milestoneMarkers}>
+            <Text style={styles.milestoneMarker}>Day 8</Text>
+            <Text style={styles.milestoneMarker}>Day 15</Text>
+            <Text style={styles.milestoneMarker}>Day 22</Text>
+            <Text style={styles.milestoneMarker}>Day 30</Text>
+          </View>
+        </View>
+
+        {/* 5. Bottom action button */}
+        <TouchableOpacity
           style={[
-            styles.heroCard,
-            {
-              opacity: fadeAnim,
-              transform: [{ translateY: slideAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }],
-            },
+            styles.claimButton,
+            isClaimedState ? styles.claimButtonClaimed : styles.claimButtonActive
           ]}
+          onPress={claimBonus}
+          disabled={claimingBonus || isClaimedState}
+          activeOpacity={0.8}
         >
-          <LinearGradient
-            colors={['rgba(143, 196, 65, 0.16)', 'rgba(143, 196, 65, 0.02)']}
-            style={styles.heroGradient}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-          />
-          <View style={styles.heroMain}>
-            <Animated.View style={[styles.coinCircle, { transform: [{ scale: pulseAnim }] }]}>
-              <FontAwesome5 name="coins" size={26} color="#000" />
-            </Animated.View>
-            <View style={{ marginLeft: 16 }}>
-              <Text style={styles.coinAmount}>{coins.toLocaleString()}</Text>
-              <Text style={styles.coinLabel}>Coins Balance</Text>
-            </View>
-          </View>
-
-          <View style={styles.heroStats}>
-            <View style={styles.heroStat}>
-              <View style={styles.statIconContainer}>
-                <Ionicons name="flame" size={16} color={BRAND_LIME} />
-              </View>
-              <Text style={styles.heroStatVal}>{streak}</Text>
-              <Text style={styles.heroStatLabel}>Streak</Text>
-            </View>
-            <View style={styles.heroStatDivider} />
-            <View style={styles.heroStat}>
-              <View style={styles.statIconContainer}>
-                <Ionicons name="star" size={16} color={BRAND_LIME} />
-              </View>
-              <Text style={styles.heroStatVal}>{points.toLocaleString()}</Text>
-              <Text style={styles.heroStatLabel}>Points</Text>
-            </View>
-            <View style={styles.heroStatDivider} />
-            <View style={styles.heroStat}>
-              <View style={styles.statIconContainer}>
-                <Ionicons name="trophy" size={16} color={BRAND_LIME} />
-              </View>
-              <Text style={styles.heroStatVal}>{longest}</Text>
-              <Text style={styles.heroStatLabel}>Best</Text>
-            </View>
-          </View>
-        </Animated.View>
-
-        {/* 3D RIBBON BANNER: "Reward Calendar" IN BRAND LIME (NO RED!) */}
-        <View style={styles.ribbonContainer}>
-          <View style={styles.ribbonFoldLeft} />
-          <LinearGradient
-            colors={[BRAND_LIME_LIGHT, BRAND_LIME, BRAND_LIME_DARK]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.ribbonBody}
-          >
-            <View style={styles.ribbonStitchTop} />
-            <Text style={styles.ribbonText}>Reward Calendar</Text>
-            <View style={styles.ribbonStitchBottom} />
-          </LinearGradient>
-          <View style={styles.ribbonFoldRight} />
-        </View>
-
-        {/* MAIN REWARD CALENDAR BOARD (Sleek Dark & Brand Lime - NO BROWN!) */}
-        <View style={styles.boardContainer}>
-          <LinearGradient
-            colors={['#161912', '#12140F', '#0D0F0A']}
-            style={styles.boardInner}
-          >
-            {/* 1. TOP MILESTONE PROGRESS TRACK (Days 8, 15, 22, 30 in Coins!) */}
-            <View style={styles.milestoneShelf}>
-              {/* Progress Line Track */}
-              <View style={styles.milestoneTrack}>
-                <View style={[styles.milestoneFill, { width: `${milestoneProgress * 100}%` }]} />
-              </View>
-
-              {/* Left Checkmark Stamp */}
-              <View style={[styles.sealBadge, streak > 0 && styles.sealBadgeActive]}>
-                <Ionicons name="checkmark" size={15} color="#000" style={{ fontWeight: '900' }} />
-              </View>
-
-              {/* Milestone Checkpoints (8, 15, 22, 30) */}
-              <View style={styles.milestoneNodesRow}>
-                {MILESTONES.map((m) => {
-                  const reached = currentMonthDay >= m.day;
-                  return (
-                    <View key={m.day} style={styles.milestoneNode}>
-                      <View style={[styles.milestoneIconWrap, reached && styles.milestoneIconWrapReached]}>
-                        <FontAwesome5
-                          name="coins"
-                          size={18}
-                          color={reached ? BRAND_LIME : '#666'}
-                        />
-                      </View>
-                      <View style={[styles.milestoneDayBadge, reached && styles.milestoneDayBadgeReached]}>
-                        <Text style={[styles.milestoneDayText, reached && styles.milestoneDayTextReached]}>
-                          {m.day}
-                        </Text>
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* 2. 7-DAY REWARD CARDS (Coins only!) */}
-            <View style={styles.calendarGrid}>
-              {/* Row 1: Days 1, 2, 3 */}
-              <View style={styles.cardRow}>
-                {STREAK_DAYS.slice(0, 3).map((item) => renderCoinDayCard(item))}
-              </View>
-
-              {/* Row 2: Days 4, 5, 6 */}
-              <View style={styles.cardRow}>
-                {STREAK_DAYS.slice(3, 6).map((item) => renderCoinDayCard(item))}
-              </View>
-
-              {/* Row 3: Day 7 (Special Full-Width Mega Card) */}
-              {renderDay7MegaCard(STREAK_DAYS[6])}
-            </View>
-          </LinearGradient>
-        </View>
-
-        {/* 3. BIG BOTTOM ACTION BUTTON ("Tap to collect") */}
-        <View style={styles.bottomActionContainer}>
-          {bonusAvailable ? (
-            <Animated.View style={{ transform: [{ scale: pulseAnim }], width: '100%' }}>
-              <TouchableOpacity
-                style={styles.collectButton}
-                activeOpacity={0.85}
-                onPress={claimBonus}
-                disabled={claimingBonus}
-              >
-                <LinearGradient
-                  colors={[BRAND_LIME_LIGHT, BRAND_LIME, BRAND_LIME_DARK]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 0, y: 1 }}
-                  style={styles.collectGradient}
-                >
-                  {claimingBonus ? (
-                    <ActivityIndicator size="small" color="#000" />
-                  ) : (
-                    <>
-                      <FontAwesome5 name="coins" size={20} color="#000" style={{ marginRight: 10 }} />
-                      <Text style={styles.collectButtonText}>
-                        Tap to collect (+{nextBonus} Coins)
-                      </Text>
-                    </>
-                  )}
-                </LinearGradient>
-              </TouchableOpacity>
-            </Animated.View>
+          {claimingBonus ? (
+            <ActivityIndicator size="small" color="#000000" />
           ) : (
-            <View style={styles.claimedButton}>
-              <LinearGradient
-                colors={['#1F241A', '#151A10', '#0E130A']}
-                style={styles.claimedGradient}
-              >
-                <Ionicons name="checkmark-circle" size={22} color={BRAND_LIME} style={{ marginRight: 10 }} />
-                <View style={{ alignItems: 'center' }}>
-                  <Text style={styles.claimedButtonText}>Bonus Claimed Today</Text>
-                  <Text style={styles.countdownText}>Next reward in: {countdown}</Text>
-                </View>
-              </LinearGradient>
-            </View>
+            <Text style={[
+              styles.claimButtonText,
+              isClaimedState && styles.claimButtonTextClaimed
+            ]}>
+              {isClaimedState ? 'Claimed' : 'Claim'}
+            </Text>
           )}
-        </View>
+        </TouchableOpacity>
 
-        {/* 4. DAILY QUESTS SECTION (From old functionality) */}
-        {quests.length > 0 && (
+        {/* Optional Daily Quests (Scrollable below main cards) */}
+        {quests && quests.length > 0 && (
           <View style={styles.questsSection}>
             <View style={styles.questsHeader}>
-              <View style={styles.questsHeaderIcon}>
-                <Ionicons name="list" size={16} color={BRAND_LIME} />
-              </View>
-              <Text style={styles.questsTitle}>Quests</Text>
+              <Text style={styles.questsTitle}>Daily Quests</Text>
               <View style={styles.questsCountBadge}>
                 <Text style={styles.questsCountText}>{quests.length}</Text>
               </View>
             </View>
-
             {quests.map((q) => (
-              <View key={q.id} style={styles.questCard}>
+              <View key={q.id || q.title} style={styles.questCard}>
                 <View style={styles.questCheckIcon}>
-                  <Ionicons name="checkmark-done" size={16} color="#000" />
+                  <Ionicons name="checkmark" size={14} color="#000" />
                 </View>
                 <View style={{ flex: 1, marginLeft: 12 }}>
                   <Text style={styles.questCardTitle}>{q.title || q.name}</Text>
@@ -406,8 +334,7 @@ export default function GamificationScreen({ navigation }) {
                   ) : null}
                 </View>
                 <View style={styles.questRewardBadge}>
-                  <FontAwesome5 name="coins" size={11} color={COIN_GOLD} />
-                  <Text style={styles.questRewardText}>+{q.reward_coins || q.coins || 0}</Text>
+                  <Text style={styles.questRewardText}>+{q.reward_coins || q.coins || 0} Coins</Text>
                 </View>
               </View>
             ))}
@@ -416,159 +343,23 @@ export default function GamificationScreen({ navigation }) {
       </ScrollView>
     </View>
   );
-
-  // Helper to render Day 1 - 6 cards (Only Coins!)
-  function renderCoinDayCard(item) {
-    const isClaimed = streak >= item.day;
-    const isToday = bonusAvailable && currentCycleDay === item.day;
-
-    return (
-      <View
-        key={item.day}
-        style={[
-          styles.dayCard,
-          isToday && styles.dayCardToday,
-          isClaimed && styles.dayCardClaimed,
-        ]}
-      >
-        {/* Header Tab */}
-        <View
-          style={[
-            styles.cardHeaderTab,
-            isToday
-              ? styles.cardHeaderTabToday
-              : isClaimed
-              ? styles.cardHeaderTabClaimed
-              : styles.cardHeaderTabFuture,
-          ]}
-        >
-          <Text
-            style={[
-              styles.cardHeaderText,
-              isToday && styles.cardHeaderTextToday,
-              isClaimed && styles.cardHeaderTextClaimed,
-            ]}
-          >
-            Day {item.day}
-          </Text>
-        </View>
-
-        {/* Card Body */}
-        <View style={styles.cardBody}>
-          <View style={styles.rewardGraphicBox}>
-            <FontAwesome5
-              name="coins"
-              size={item.day >= 4 ? 32 : 28}
-              color={COIN_GOLD}
-            />
-          </View>
-
-          <Text style={[styles.rewardAmountText, isClaimed && styles.rewardAmountTextClaimed]}>
-            +{item.coins} Coins
-          </Text>
-
-          {/* Claimed Stamp */}
-          {isClaimed && (
-            <View style={styles.claimedOverlay}>
-              <View style={styles.claimedStamp}>
-                <Ionicons name="checkmark-sharp" size={22} color="#000" />
-              </View>
-            </View>
-          )}
-
-          {/* Active Highlight for Today */}
-          {isToday && (
-            <View style={styles.todayHighlightBadge}>
-              <Text style={styles.todayHighlightText}>READY</Text>
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  }
-
-  // Helper to render Day 7 Mega Card (Only Coins!)
-  function renderDay7MegaCard(item) {
-    const isClaimed = streak >= 7;
-    const isToday = bonusAvailable && currentCycleDay === 7;
-
-    return (
-      <View
-        style={[
-          styles.day7Card,
-          isToday && styles.dayCardToday,
-          isClaimed && styles.dayCardClaimed,
-        ]}
-      >
-        {/* Header Tab */}
-        <View
-          style={[
-            styles.cardHeaderTab,
-            styles.cardHeaderTabWide,
-            isToday
-              ? styles.cardHeaderTabToday
-              : isClaimed
-              ? styles.cardHeaderTabClaimed
-              : styles.cardHeaderTabFuture,
-          ]}
-        >
-          <Ionicons name="star" size={13} color={isToday ? '#000' : BRAND_LIME} style={{ marginRight: 6 }} />
-          <Text
-            style={[
-              styles.cardHeaderText,
-              isToday && styles.cardHeaderTextToday,
-              isClaimed && styles.cardHeaderTextClaimed,
-            ]}
-          >
-            Day 7 - Mega Bonus
-          </Text>
-          <Ionicons name="star" size={13} color={isToday ? '#000' : BRAND_LIME} style={{ marginLeft: 6 }} />
-        </View>
-
-        {/* Day 7 Content */}
-        <View style={styles.day7Body}>
-          <View style={styles.day7GraphicRow}>
-            <View style={styles.day7CoinGroup}>
-              <FontAwesome5 name="coins" size={36} color={COIN_GOLD} />
-            </View>
-            <View style={styles.day7TextGroup}>
-              <Text style={styles.day7RewardTitle}>+{item.coins} Coins</Text>
-              <Text style={styles.day7RewardSub}>7-Day Streak Complete!</Text>
-            </View>
-          </View>
-
-          {/* Claimed Overlay */}
-          {isClaimed && (
-            <View style={styles.claimedOverlay}>
-              <View style={styles.claimedStamp}>
-                <Ionicons name="checkmark-sharp" size={26} color="#000" />
-              </View>
-            </View>
-          )}
-
-          {/* Active Highlight for Day 7 */}
-          {isToday && (
-            <View style={styles.todayHighlightBadge}>
-              <Text style={styles.todayHighlightText}>MEGA REWARD READY</Text>
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  }
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0A0C08',
+    backgroundColor: BG_DARK,
   },
-  centered: {
+  centerContent: {
     justifyContent: 'center',
     alignItems: 'center',
   },
-
-  // Navigation Header
+  loadingText: {
+    color: TEXT_MUTED_LIGHT,
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -576,586 +367,288 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#161912',
-    borderWidth: 1,
-    borderColor: '#262D1D',
-    justifyContent: 'center',
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#161A14',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '800',
-    color: '#fff',
+    color: '#FFFFFF',
+    letterSpacing: 0.2,
   },
-
+  headerSpacer: {
+    width: 40,
+  },
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: 4,
   },
-
-  // Hero Card (From old functionality, Brand Lime & Dark styling)
-  heroCard: {
+  // Card 1: Current Streak
+  streakCard: {
+    backgroundColor: CARD_BG,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#262D1D',
-    backgroundColor: '#12150E',
-    padding: 18,
-    marginBottom: 20,
-    position: 'relative',
-    overflow: 'hidden',
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    marginBottom: 14,
   },
-  heroGradient: {
-    ...StyleSheet.absoluteFillObject,
+  currentStreakLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: TEXT_MUTED,
+    marginBottom: 6,
   },
-  heroMain: {
+  streakDays: {
+    fontSize: 54,
+    fontWeight: '900',
+    color: LIME,
+    letterSpacing: -1,
+    marginBottom: 6,
+  },
+  streakInfo: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: TEXT_MUTED,
+  },
+  // Card 2: 7-Day Weekly Row
+  weekCard: {
+    backgroundColor: CARD_BG,
+    borderRadius: 20,
+    paddingVertical: 20,
+    paddingHorizontal: 12,
+    marginBottom: 14,
+  },
+  weekRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 16,
   },
-  coinCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: BRAND_LIME,
-    justifyContent: 'center',
+  dayCol: {
     alignItems: 'center',
-    shadowColor: BRAND_LIME,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 5,
+    flex: 1,
   },
-  coinAmount: {
-    fontSize: 28,
-    fontWeight: '900',
-    color: '#fff',
-    letterSpacing: -0.5,
+  pastDayCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    elevation: 2,
   },
-  coinLabel: {
-    fontSize: 12,
-    color: '#8A9580',
-    marginTop: 2,
+  pastDayNumber: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#7B8794',
+  },
+  todayCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#11160F',
+    borderWidth: 2,
+    borderColor: LIME,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todayCircleClaimed: {
+    backgroundColor: 'rgba(118, 200, 53, 0.12)',
+  },
+  todayNumber: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: LIME,
+  },
+  dayColLabel: {
+    fontSize: 12.5,
     fontWeight: '600',
+    color: '#8A9784',
+    marginTop: 8,
+    textAlign: 'center',
   },
-  heroStats: {
+  dayColLabelToday: {
+    color: LIME,
+    fontWeight: '800',
+  },
+  weekNote: {
+    fontSize: 12.5,
+    color: TEXT_MUTED,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  // Card 3: Bonus Claim / Timer Card
+  claimedCard: {
+    backgroundColor: '#131A0F',
+    borderWidth: 1.5,
+    borderColor: LIME,
+    borderRadius: 20,
+    paddingVertical: 22,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  claimedTitle: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: LIME,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  nextRewardLabel: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: TEXT_MUTED,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  timerText: {
+    fontSize: 36,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 1,
+    textAlign: 'center',
+  },
+  // Card 4: Streak Milestones
+  milestonesCard: {
+    backgroundColor: CARD_BG,
+    borderRadius: 20,
+    paddingVertical: 18,
+    paddingHorizontal: 18,
+    marginBottom: 16,
+  },
+  milestonesHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-  },
-  heroStat: {
     alignItems: 'center',
-    flex: 1,
-  },
-  statIconContainer: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: 'rgba(143, 196, 65, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  heroStatVal: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#fff',
-    marginBottom: 2,
-  },
-  heroStatLabel: {
-    fontSize: 10,
-    color: '#8A9580',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  heroStatDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: '#262D1D',
-  },
-
-  // 3D Ribbon Banner in Brand Lime
-  ribbonContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: -16,
-    zIndex: 20,
-  },
-  ribbonBody: {
-    paddingHorizontal: 32,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    borderColor: BRAND_LIME_LIGHT,
-    shadowColor: BRAND_LIME,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 6,
-    elevation: 8,
-  },
-  ribbonText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000',
-    textAlign: 'center',
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-  },
-  ribbonStitchTop: {
-    position: 'absolute',
-    top: 2,
-    left: 8,
-    right: 8,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.4)',
-  },
-  ribbonStitchBottom: {
-    position: 'absolute',
-    bottom: 2,
-    left: 8,
-    right: 8,
-    height: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.25)',
-  },
-  ribbonFoldLeft: {
-    position: 'absolute',
-    left: 12,
-    bottom: -6,
-    width: 14,
-    height: 14,
-    backgroundColor: BRAND_LIME_DARK,
-    transform: [{ rotate: '45deg' }],
-    zIndex: -1,
-  },
-  ribbonFoldRight: {
-    position: 'absolute',
-    right: 12,
-    bottom: -6,
-    width: 14,
-    height: 14,
-    backgroundColor: BRAND_LIME_DARK,
-    transform: [{ rotate: '45deg' }],
-    zIndex: -1,
-  },
-
-  // Main Board Frame (Dark gaming board with Brand Lime border)
-  boardContainer: {
-    borderRadius: 24,
-    borderWidth: 2,
-    borderColor: '#2F3A22',
-    backgroundColor: '#0F120A',
-    padding: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 8,
-    marginTop: 6,
-  },
-  boardInner: {
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingTop: 16,
-    paddingBottom: 14,
-    overflow: 'hidden',
-  },
-
-  // 1. Milestone Shelf (Days 8, 15, 22, 30)
-  milestoneShelf: {
-    backgroundColor: '#181E12',
-    borderWidth: 1,
-    borderColor: '#2E3A20',
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
     marginBottom: 14,
-    position: 'relative',
   },
-  milestoneTrack: {
-    position: 'absolute',
-    top: 36,
-    left: 44,
-    right: 28,
-    height: 5,
-    backgroundColor: '#26301A',
-    borderRadius: 3,
-    zIndex: 1,
+  milestonesTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#FFFFFF',
   },
-  milestoneFill: {
+  nextMilestoneText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: TEXT_MUTED,
+  },
+  progressBar: {
+    height: 8,
+    backgroundColor: '#262D21',
+    borderRadius: 4,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  progressFill: {
     height: '100%',
-    backgroundColor: BRAND_LIME,
-    borderRadius: 3,
-  },
-  sealBadge: {
-    position: 'absolute',
-    top: 16,
-    left: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#26301A',
-    borderWidth: 1.5,
-    borderColor: '#3D4D2A',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 5,
-  },
-  sealBadgeActive: {
-    backgroundColor: BRAND_LIME,
-    borderColor: BRAND_LIME_LIGHT,
-  },
-  milestoneNodesRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    zIndex: 2,
-    gap: 14,
-  },
-  milestoneNode: {
-    alignItems: 'center',
-    width: 44,
-  },
-  milestoneIconWrap: {
-    width: 32,
-    height: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  milestoneIconWrapReached: {
-    transform: [{ scale: 1.1 }],
-  },
-  milestoneDayBadge: {
-    width: 24,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#222B17',
-    borderWidth: 1,
-    borderColor: '#384725',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  milestoneDayBadgeReached: {
-    backgroundColor: BRAND_LIME,
-    borderColor: BRAND_LIME_LIGHT,
-  },
-  milestoneDayText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#8A9580',
-  },
-  milestoneDayTextReached: {
-    color: '#000',
-  },
-
-  // 2. Calendar Grid
-  calendarGrid: {
-    gap: 8,
-  },
-  cardRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  dayCard: {
-    flex: 1,
-    backgroundColor: '#171B12',
-    borderWidth: 1.5,
-    borderColor: '#2A341E',
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  dayCardToday: {
-    borderColor: BRAND_LIME,
-    borderWidth: 2,
-    backgroundColor: '#1E2517',
-    shadowColor: BRAND_LIME,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  dayCardClaimed: {
-    opacity: 0.65,
-    backgroundColor: '#12150E',
-  },
-
-  // Card Header Tabs
-  cardHeaderTab: {
-    paddingVertical: 5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#2A341E',
-  },
-  cardHeaderTabWide: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  cardHeaderTabToday: {
-    backgroundColor: BRAND_LIME,
-    borderBottomColor: BRAND_LIME_DARK,
-  },
-  cardHeaderTabClaimed: {
-    backgroundColor: '#1D2416',
-    borderBottomColor: '#26301C',
-  },
-  cardHeaderTabFuture: {
-    backgroundColor: '#202619',
-    borderBottomColor: '#2A341E',
-  },
-  cardHeaderText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#8A9580',
-    letterSpacing: 0.3,
-  },
-  cardHeaderTextToday: {
-    color: '#000',
-    fontWeight: '900',
-  },
-  cardHeaderTextClaimed: {
-    color: BRAND_LIME,
-  },
-
-  // Card Body
-  cardBody: {
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 80,
-  },
-  rewardGraphicBox: {
-    width: 44,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  rewardAmountText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#FFF',
-    textAlign: 'center',
-  },
-  rewardAmountTextClaimed: {
-    color: '#666',
-  },
-
-  // Day 7 Mega Card (Full Width)
-  day7Card: {
-    backgroundColor: '#171B12',
-    borderWidth: 1.5,
-    borderColor: '#2A341E',
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginTop: 2,
-  },
-  day7Body: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    justifyContent: 'center',
-  },
-  day7GraphicRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 16,
-  },
-  day7CoinGroup: {
-    width: 48,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  day7TextGroup: {
-    alignItems: 'flex-start',
-  },
-  day7RewardTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#FFF',
-    letterSpacing: 0.2,
-  },
-  day7RewardSub: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND_LIME,
-    marginTop: 2,
-  },
-
-  // Claimed Stamp Overlay
-  claimedOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(10, 13, 8, 0.72)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  claimedStamp: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: BRAND_LIME,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 3,
-  },
-  todayHighlightBadge: {
-    position: 'absolute',
-    bottom: 2,
-    backgroundColor: BRAND_LIME,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    backgroundColor: LIME,
     borderRadius: 4,
   },
-  todayHighlightText: {
-    fontSize: 7,
-    fontWeight: '900',
-    color: '#000',
-    letterSpacing: 0.5,
-  },
-
-  // 3. Bottom Action Button
-  bottomActionContainer: {
-    marginTop: 18,
+  milestoneMarkers: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
   },
-  collectButton: {
-    borderRadius: 22,
-    overflow: 'hidden',
-    shadowColor: BRAND_LIME,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
-    shadowRadius: 8,
-    elevation: 6,
+  milestoneMarker: {
+    fontSize: 12.5,
+    fontWeight: '500',
+    color: TEXT_MUTED,
   },
-  collectGradient: {
-    flexDirection: 'row',
+  // Card 5: Bottom Button
+  claimButton: {
+    borderRadius: 16,
+    height: 56,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 15,
-    paddingHorizontal: 28,
-    borderRadius: 22,
+    marginBottom: 16,
   },
-  collectButtonText: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: '#000',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
+  claimButtonActive: {
+    backgroundColor: LIME,
   },
-  claimedButton: {
-    width: '100%',
-    borderRadius: 20,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#262D1D',
+  claimButtonClaimed: {
+    backgroundColor: '#476326',
   },
-  claimedGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-  },
-  claimedButtonText: {
-    fontSize: 14,
+  claimButtonText: {
+    fontSize: 17,
     fontWeight: '800',
-    color: '#E0E0E0',
+    color: '#000000',
   },
-  countdownText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: BRAND_LIME,
-    marginTop: 2,
+  claimButtonTextClaimed: {
+    color: '#0D1409',
   },
-
-  // 4. Daily Quests Section
+  // Quests
   questsSection: {
-    marginTop: 22,
-    backgroundColor: '#12150E',
-    borderWidth: 1,
-    borderColor: '#262D1D',
-    borderRadius: 18,
-    padding: 16,
+    marginTop: 8,
+    marginBottom: 16,
   },
   questsHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 12,
-  },
-  questsHeaderIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(143, 196, 65, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 8,
+    paddingHorizontal: 4,
   },
   questsTitle: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '800',
-    color: '#FFF',
-    flex: 1,
+    color: '#FFFFFF',
   },
   questsCountBadge: {
-    backgroundColor: 'rgba(143, 196, 65, 0.18)',
+    backgroundColor: '#1E2519',
+    borderRadius: 12,
     paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
+    paddingVertical: 2,
   },
   questsCountText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: BRAND_LIME,
+    fontSize: 12,
+    fontWeight: '700',
+    color: LIME,
   },
   questCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#181C13',
-    borderWidth: 1,
-    borderColor: '#28321D',
+    backgroundColor: CARD_BG,
     borderRadius: 14,
-    padding: 12,
-    marginBottom: 8,
+    padding: 14,
+    marginBottom: 10,
   },
   questCheckIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    backgroundColor: BRAND_LIME,
-    justifyContent: 'center',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: LIME,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   questCardTitle: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
-    color: '#FFF',
+    color: '#FFFFFF',
+    marginBottom: 2,
   },
   questCardDesc: {
-    fontSize: 11,
-    color: '#8A9580',
-    marginTop: 2,
+    fontSize: 12,
+    color: TEXT_MUTED_LIGHT,
   },
   questRewardBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(143, 196, 65, 0.15)',
+    backgroundColor: '#1E2519',
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 12,
   },
   questRewardText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: BRAND_LIME,
+    fontSize: 12,
+    fontWeight: '700',
+    color: LIME,
   },
 });

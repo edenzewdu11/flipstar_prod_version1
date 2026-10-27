@@ -393,14 +393,10 @@ function ChatView({ conversation, onBack, userId, navigation }) {
 
   // Pick image from library
   const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Allow photo access to send images.');
-      return;
-    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.8,
+      selectionLimit: 1,
     });
     if (!result.canceled && result.assets?.[0]) {
       const asset = result.assets[0];
@@ -579,7 +575,11 @@ function ChatView({ conversation, onBack, userId, navigation }) {
           ) : null}
         </View>
         <TouchableOpacity
-          onPress={() => navigation.navigate('ProfileStack', { userId: other?.id })}
+          onPress={() => navigation.navigate('ProfileStack', { 
+            userId: other?.id, 
+            username: other?.username, 
+            user: other 
+          })}
           style={{ padding: 6 }}
         >
           <Ionicons name="person-outline" size={20} color={colors.primary} />

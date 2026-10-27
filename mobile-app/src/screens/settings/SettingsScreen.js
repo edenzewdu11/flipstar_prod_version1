@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useLanguage } from '../../contexts/LanguageContext';
+import * as Application from 'expo-application';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '../../api';
 
@@ -720,7 +721,9 @@ export default function SettingsScreen({ navigation }) {
         </TouchableOpacity>
 
         <View style={styles.footer}>
-          <Text style={[styles.version, { color: colors.textSecondary }]}>FlipStar by Ethio telecom • v1.0.0</Text>
+          <Text style={[styles.version, { color: colors.textSecondary }]}>
+            FlipStar by Ethio telecom • v{Application.nativeApplicationVersion || '1.0.0'} (Build {Application.nativeBuildVersion || '1'})
+          </Text>
         </View>
       </ScrollView>
 

@@ -11,6 +11,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { useBlock } from '../../contexts/BlockContext';
 import api from '../../api';
 import config from '../../config';
+import { AppAlert } from '../../components/common/AppAlert';
 
 const { width, height } = Dimensions.get('window');
 const GOLD = '#8fc441';
@@ -101,6 +102,8 @@ export default function ProfileScreen({ navigation, route }) {
   const [showProfileZoom, setShowProfileZoom] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
   const [bioText, setBioText] = useState('');
+  const [gamificationStatus, setGamificationStatus] = useState(null);
+  const [claimingDailyBonus, setClaimingDailyBonus] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
   const [editForm, setEditForm] = useState({
     first_name: '',
@@ -145,6 +148,12 @@ export default function ProfileScreen({ navigation, route }) {
       const profileData = await api.request(profileEndpoint);
       setProfile(profileData);
       setLoading(false);
+
+      if (isOwnProfileCheck) {
+        api.request('/gamification/status/')
+          .then(res => { if (res) setGamificationStatus(res); })
+          .catch(() => {});
+      }
 
       const nestedUserEarly = profileData.user || profileData;
       const realUserId = nestedUserEarly.id ?? profileData.id ?? targetUserId;
@@ -364,6 +373,48 @@ export default function ProfileScreen({ navigation, route }) {
   const onRefresh = () => {
     setRefreshing(true);
     loadProfile();
+  };
+
+  const handleClaimDailyBonus = async () => {
+    if (claimingDailyBonus) return;
+    setClaimingDailyBonus(true);
+    try {
+      const res = await api.request('/gamification/login-bonus/', { method: 'POST' });
+      const currentStreak = (gamificationStatus?.login_streak?.current ?? 0) + 1;
+      const cycleDay = currentStreak === 0 ? 1 : ((currentStreak - 1) % 7) + 1;
+      const fallbackCoins = cycleDay <= 4 ? 4 : 3;
+      const earned = res.coins_earned || res.coins || (gamificationStatus?.login_streak?.next_bonus?.coins ?? fallbackCoins);
+      AppAlert.alert('🎁 Bonus Claimed!', `You earned +${earned} Coins for your daily login streak!`);
+      const updated = await api.request('/gamification/status/').catch(() => null);
+      if (updated) {
+        setGamificationStatus(updated);
+      } else {
+        setGamificationStatus(prev => prev ? {
+          ...prev,
+          login_streak: {
+            ...prev.login_streak,
+            bonus_available: false,
+            current: currentStreak,
+          }
+        } : null);
+      }
+    } catch (e) {
+      const errorMsg = e?.message || '';
+      if (errorMsg.includes('already claimed today')) {
+        AppAlert.alert('⏰ Bonus Already Claimed', 'You already claimed your login bonus today. Come back tomorrow for your next bonus!');
+        setGamificationStatus(prev => prev ? {
+          ...prev,
+          login_streak: {
+            ...prev.login_streak,
+            bonus_available: false,
+          }
+        } : null);
+      } else {
+        AppAlert.alert('Error', e?.message || 'Could not claim daily bonus.');
+      }
+    } finally {
+      setClaimingDailyBonus(false);
+    }
   };
 
   const toggleFollow = async () => {
@@ -862,7 +913,10 @@ export default function ProfileScreen({ navigation, route }) {
               <Ionicons name="ribbon" size={24} color={colors.primary} />
             </TouchableOpacity>
             <TouchableOpacity onPress={() => navigation.navigate('Gamification')} style={styles.headerButton}>
-              <Ionicons name="game-controller-outline" size={24} color={colors.primary} />
+              <Ionicons name="gift-outline" size={24} color={colors.primary} />
+              {isOwnProfile && gamificationStatus?.login_streak?.bonus_available && (
+                <View style={styles.bonusBadgeDot} />
+              )}
             </TouchableOpacity>
             <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={styles.headerButton}>
               <Ionicons name="settings-outline" size={24} color={colors.primary} />
@@ -977,6 +1031,72 @@ export default function ProfileScreen({ navigation, route }) {
             )}
           </View>
           
+          {/* Daily Bonus & Streak Card - REMOVED (use Gamification screen instead) */}
+
+          {/* Edit Profile Button for Own Profile */}
+            const streakCount = gamificationStatus?.login_streak?.current ?? 0;
+            const bonusAvailable = gamificationStatus ? Boolean(gamificationStatus?.login_streak?.bonus_available) : false;
+            const cycleDay = streakCount === 0 ? 1 : ((streakCount - 1) % 7) + 1;
+            const nextCycleDay = bonusAvailable ? cycleDay : (((streakCount) % 7) + 1);
+            const nextBonusCoins = gamificationStatus?.login_streak?.next_bonus?.coins ?? (nextCycleDay <= 4 ? 4 : 3);
+            return (
+              <View style={[styles.dailyBonusCard, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                <TouchableOpacity
+                  style={styles.dailyBonusContent}
+                  activeOpacity={0.85}
+                  onPress={() => navigation.navigate('Gamification')}
+                >
+                  <View style={[styles.dailyBonusIconWrap, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
+                    <Text style={styles.dailyBonusFireEmoji}>🔥</Text>
+                  </View>
+                  <View style={styles.dailyBonusInfo}>
+                    <View style={styles.dailyBonusTitleRow}>
+                      <Text style={[styles.dailyBonusTitle, { color: colors.text }]}>Daily Bonus</Text>
+                      <View style={[styles.streakPill, { backgroundColor: '#8fc441' + '22' }]}>
+                        <Text style={[styles.streakPillText, { color: colors.primary }]}>
+                          {streakCount}d streak
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.dailyBonusSubtitle, { color: colors.textSecondary }]}>
+                      {bonusAvailable
+                        ? `Day ${cycleDay}: Claim +${nextBonusCoins} coins today!`
+                        : `Claimed today • +${nextBonusCoins} coins tomorrow`}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                <View style={styles.dailyBonusActionWrap}>
+                  {bonusAvailable ? (
+                    <TouchableOpacity
+                      style={[styles.claimBonusBtn, { backgroundColor: colors.primary }]}
+                      activeOpacity={0.8}
+                      onPress={handleClaimDailyBonus}
+                      disabled={claimingDailyBonus}
+                    >
+                      {claimingDailyBonus ? (
+                        <ActivityIndicator size="small" color="#000" />
+                      ) : (
+                        <>
+                          <Ionicons name="gift" size={14} color="#000" style={{ marginRight: 4 }} />
+                          <Text style={styles.claimBonusBtnText}>
+                            Claim +{nextBonusCoins}
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.claimedBadge, { borderColor: colors.border }]}
+                      activeOpacity={0.8}
+                      onPress={() => navigation.navigate('Gamification')}
+                    >
+                      <Ionicons name="checkmark-circle" size={15} color={colors.primary} style={{ marginRight: 4 }} />
+                      <Text style={[styles.claimedBadgeText, { color: colors.primary }]}>Claimed</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
           {/* Edit Profile Button for Own Profile */}
           {isOwnProfile && (
             <TouchableOpacity 
@@ -2440,5 +2560,102 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#fff',
     fontWeight: '600',
+  },
+  // Daily Bonus Card
+  dailyBonusCard: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dailyBonusContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 10,
+  },
+  dailyBonusIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  dailyBonusFireEmoji: {
+    fontSize: 20,
+  },
+  dailyBonusInfo: {
+    flex: 1,
+  },
+  dailyBonusTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  dailyBonusTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  streakPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  streakPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  dailyBonusSubtitle: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  dailyBonusActionWrap: {
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+  },
+  claimBonusBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    shadowColor: '#8fc441',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  claimBonusBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#000',
+  },
+  claimedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  claimedBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  bonusBadgeDot: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#8fc441',
   },
 });

@@ -173,7 +173,11 @@ export default function NotificationsScreen({ navigation }) {
     
     if (notif.type === 'follow' && notif.actor?.id) {
       const actor = notif.sender || notif.actor;
-      navigation.navigate('ProfileStack', { userId: actor.id });
+      navigation.navigate('ProfileStack', { 
+        userId: actor.id, 
+        username: actor.username, 
+        user: actor 
+      });
     } else if (notif.reel_id) {
       navigation.navigate('ReelsDetail', { initialVideoId: notif.reel_id });
     } else if (notif.campaign_id) {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   ActivityIndicator, Alert, Modal, TextInput, RefreshControl, FlatList, Linking,
@@ -56,6 +56,8 @@ export default function WalletScreen({ navigation }) {
   const [summary, setSummary] = useState(null);
   const [config, setConfig] = useState(null);
   const [transactions, setTransactions] = useState([]);
+  const [transactionsLoading, setTransactionsLoading] = useState(false);
+  const [txFilter, setTxFilter] = useState('all'); // 'all' | 'gift_sent' | 'gift_received'
   const [withdrawals, setWithdrawals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -75,6 +77,7 @@ export default function WalletScreen({ navigation }) {
   const [selectedPackage, setSelectedPackage] = useState(null);
   const [phone, setPhone] = useState('');
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successTitle, setSuccessTitle] = useState('You Bought Successfully!');
   const [successMessage, setSuccessMessage] = useState('');
   const initialFocusHandledRef = useRef(false);
 
@@ -120,6 +123,7 @@ export default function WalletScreen({ navigation }) {
 
   const loadTransactions = useCallback(async () => {
     try {
+      setTransactionsLoading(true);
       let allTransactions = [];
       let page = 1;
       let hasMore = true;
@@ -136,22 +140,19 @@ export default function WalletScreen({ navigation }) {
             console.log(`Page ${page}: Loaded ${pageTransactions.length} transactions`);
           } else {
             consecutiveEmptyPages++;
-            console.log(`Page ${page}: No transactions found`);
           }
           
           hasMore = data.has_next && pageTransactions.length > 0;
           page++;
           
-          // Safety check: don't load more than 50 pages total
-          if (page > 50) {
-            console.log('Reached maximum page limit (50), stopping pagination');
+          // Safety check: don't load more than 20 pages total
+          if (page > 20) {
             break;
           }
         } catch (pageError) {
           console.error(`Error loading page ${page}:`, pageError);
           consecutiveEmptyPages++;
           if (consecutiveEmptyPages >= 3) {
-            console.log('Too many consecutive errors, stopping pagination');
             break;
           }
           page++;
@@ -165,10 +166,27 @@ export default function WalletScreen({ navigation }) {
       setTransactions(allTransactions);
     } catch (e) {
       console.error('❌ Critical error loading transactions:', e);
-      // Fallback to empty array to prevent UI issues
-      setTransactions([]);
+    } finally {
+      setTransactionsLoading(false);
     }
   }, []);
+
+  const displayedTransactions = useMemo(() => {
+    if (!transactions || transactions.length === 0) return [];
+    if (txFilter === 'gift_sent') {
+      return transactions.filter(tx => {
+        const t = String(tx.type || tx.transaction_type || '').toLowerCase();
+        return t === 'gift_sent' || t === 'send_gift' || (t.includes('gift') && !tx.is_credit) || t.includes('sent');
+      });
+    }
+    if (txFilter === 'gift_received') {
+      return transactions.filter(tx => {
+        const t = String(tx.type || tx.transaction_type || '').toLowerCase();
+        return t === 'gift_received' || t === 'receive_gift' || (t.includes('gift') && tx.is_credit) || t.includes('received');
+      });
+    }
+    return transactions;
+  }, [transactions, txFilter]);
 
   const loadWithdrawals = useCallback(async () => {
     try {
@@ -386,6 +404,11 @@ export default function WalletScreen({ navigation }) {
     if (!selectedPackage) {
       Alert.alert('Error', 'Select a package'); return;
     }
+    const currentPkg = selectedPackage;
+    const initialPurchased = Number(summary?.balance?.purchased || summary?.balance?.total || 0);
+    const pkgCoins = currentPkg.coin_amount || currentPkg.coins || '';
+    const pkgPrice = currentPkg.price_etb || currentPkg.price || '';
+
     setProcessing(true);
     try {
       let userPhone = user?.phone_number || user?.phone || user?.username || '';
@@ -397,10 +420,10 @@ export default function WalletScreen({ navigation }) {
       }
 
       const res = await api.telebirrCoinPurchase({
-        packageId: selectedPackage.id,
-        amountEtb: selectedPackage.price,
+        packageId: currentPkg.id,
+        amountEtb: currentPkg.price || currentPkg.price_etb,
         phoneNumber: userPhone,
-        coins: selectedPackage.coins,
+        coins: currentPkg.coins || currentPkg.coin_amount,
       });
 
       if (!res?.success && !res?.mandate_id && !res?.originator_conversation_id) {
@@ -409,6 +432,14 @@ export default function WalletScreen({ navigation }) {
       }
 
       setShowTopUpModal(false);
+
+      if (res?.success && !res?.is_pending) {
+        setSuccessTitle('You Bought Successfully!');
+        setSuccessMessage(`You have successfully bought ${pkgCoins} coins for ${pkgPrice} ETB! Your wallet has been updated.`);
+        setShowSuccessModal(true);
+        await refreshWalletData(true);
+        return;
+      }
 
       Alert.alert(
         'Payment Requested',
@@ -419,11 +450,25 @@ export default function WalletScreen({ navigation }) {
             let pollCount = 0;
             const pollInterval = setInterval(async () => {
               pollCount += 1;
+              try {
+                const updated = await api.request('/wallet/', { skipCache: true });
+                const newPurchased = Number(updated?.balance?.purchased || updated?.balance?.total || 0);
+                if (newPurchased > initialPurchased) {
+                  clearInterval(pollInterval);
+                  setSummary(prev => ({ ...prev, ...updated }));
+                  setSuccessTitle('You Bought Successfully!');
+                  setSuccessMessage(`You have successfully bought ${pkgCoins} coins for ${pkgPrice} ETB! Your wallet has been credited.`);
+                  setShowSuccessModal(true);
+                  refreshWalletData(true);
+                  return;
+                }
+              } catch (_) {}
+
               await refreshWalletData(true);
               if (pollCount >= 12) {
                 clearInterval(pollInterval);
               }
-            }, 5000);
+            }, 4000);
           }
         }]
       );
@@ -574,24 +619,10 @@ export default function WalletScreen({ navigation }) {
               <Text style={styles.actionText}>Buy Coins</Text>
             </View>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.cardBg }]} onPress={() => setShowReinvestModal(true)}>
-            <View style={[styles.actionGrad, { backgroundColor: GOLD }]}>
-              <Ionicons name="repeat" size={24} color="#fff" />
-              <Text style={styles.actionText}>Re-invest</Text>
-            </View>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.actionRow}>
           <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.cardBg }]} onPress={openWithdrawModal}>
             <View style={[styles.actionGrad, { backgroundColor: GOLD }]}>
               <Ionicons name="cash-outline" size={24} color="#fff" />
               <Text style={styles.actionText}>Withdraw</Text>
-            </View>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.cardBg }]} onPress={() => handleTabChange('transactions')}>
-            <View style={[styles.actionGrad, { backgroundColor: GOLD }]}>
-              <Ionicons name="receipt" size={22} color="#fff" />
-              <Text style={styles.actionText}>Transactions</Text>
             </View>
           </TouchableOpacity>
         </View>
@@ -665,46 +696,87 @@ export default function WalletScreen({ navigation }) {
           {activeTab === 'transactions' && (
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <Text style={styles.sectionTitle}>All Transactions</Text>
+                <Text style={styles.sectionTitle}>Transactions</Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <Text style={{ fontSize: 12, color: colors.textSecondary, marginRight: 8 }}>
-                    {transactions.length > 0 ? `${transactions.length} loaded` : ''}
+                    {displayedTransactions.length > 0 ? `${displayedTransactions.length} loaded` : ''}
                   </Text>
-                  <TouchableOpacity onPress={() => refreshWalletData(true)} style={{ padding: 4 }}>
-                    <Ionicons name="refresh" size={16} color={colors.primary} />
+                  <TouchableOpacity onPress={() => loadTransactions()} style={{ padding: 4 }}>
+                    {transactionsLoading ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <Ionicons name="refresh" size={16} color={colors.primary} />
+                    )}
                   </TouchableOpacity>
                 </View>
               </View>
-              {transactions.length === 0
-                ? <Text style={styles.emptyText}>No transactions yet</Text>
-                : (
-                  <FlatList
-                    data={transactions}
-                    keyExtractor={(item) => item.id?.toString() || `${item.type}-${item.created_at}`}
-                    renderItem={({ item }) => renderTxRow(item)}
-                    scrollEnabled={false}
-                    nestedScrollEnabled={false}
-                  />
-                )}
-              {activeTab === 'transactions' && transactions.length > 0 && (
-                <View style={[styles.monetizeSection, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
-                  <View style={styles.monetizeHeader}>
-                    <Ionicons name="cash-outline" size={24} color={GOLD} />
-                    <View style={styles.monetizeInfo}>
-                      <Text style={[styles.monetizeTitle, { color: colors.text }]}>Monetize Your Coins</Text>
-                      <Text style={[styles.monetizeSubtitle, { color: colors.textSecondary }]}>
-                        Convert your available coins to ETB via telebirr
-                      </Text>
-                    </View>
+
+              {/* Transaction Type Filters */}
+              <View style={styles.txFilterRow}>
+                <TouchableOpacity
+                  style={[styles.txFilterPill, txFilter === 'all' && styles.txFilterPillActive]}
+                  onPress={() => setTxFilter('all')}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.txFilterText, txFilter === 'all' && styles.txFilterTextActive]}>
+                    All
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.txFilterPill, txFilter === 'gift_sent' && styles.txFilterPillActive]}
+                  onPress={() => setTxFilter('gift_sent')}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="gift-outline" size={13} color={txFilter === 'gift_sent' ? '#000' : '#8E8E93'} style={{ marginRight: 4 }} />
+                  <Text style={[styles.txFilterText, txFilter === 'gift_sent' && styles.txFilterTextActive]}>
+                    Gifts Sent
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.txFilterPill, txFilter === 'gift_received' && styles.txFilterPillActive]}
+                  onPress={() => setTxFilter('gift_received')}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="gift" size={13} color={txFilter === 'gift_received' ? '#000' : '#8E8E93'} style={{ marginRight: 4 }} />
+                  <Text style={[styles.txFilterText, txFilter === 'gift_received' && styles.txFilterTextActive]}>
+                    Gifts Received
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              {displayedTransactions.length === 0 ? (
+                <View style={styles.emptyContainer}>
+                  <View style={styles.emptyIconCircle}>
+                    <Ionicons
+                      name={txFilter === 'gift_sent' ? 'gift-outline' : txFilter === 'gift_received' ? 'gift' : 'receipt-outline'}
+                      size={28}
+                      color="#8fc441"
+                    />
                   </View>
-                  <TouchableOpacity 
-                    style={[styles.monetizeBtn, { backgroundColor: GOLD }]}
-                    onPress={() => handleMonetizeCoins()}
-                  >
-                    <Ionicons name="trending-up" size={20} color="#000" />
-                    <Text style={styles.monetizeBtnText}>Monetize All Coins</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.emptyTitle}>
+                    {txFilter === 'gift_sent'
+                      ? 'No Gifts Sent Yet'
+                      : txFilter === 'gift_received'
+                      ? 'No Gifts Received Yet'
+                      : 'No Transactions Yet'}
+                  </Text>
+                  <Text style={styles.emptySubtext}>
+                    {txFilter === 'gift_sent'
+                      ? 'Gifts you send to creators on reels will appear here.'
+                      : txFilter === 'gift_received'
+                      ? 'Gifts you receive from viewers and followers will appear here.'
+                      : 'Your coins and points activity will appear here.'}
+                  </Text>
                 </View>
+              ) : (
+                <FlatList
+                  data={displayedTransactions}
+                  keyExtractor={(item) => item.id?.toString() || `${item.type}-${item.created_at}`}
+                  renderItem={({ item }) => renderTxRow(item)}
+                  scrollEnabled={false}
+                  nestedScrollEnabled={false}
+                />
               )}
             </>
           )}
@@ -1003,7 +1075,7 @@ export default function WalletScreen({ navigation }) {
       <SuccessModal
         visible={showSuccessModal}
         onClose={() => setShowSuccessModal(false)}
-        title="Success"
+        title={successTitle || 'You Bought Successfully!'}
         message={successMessage}
       />
     </View>
@@ -1362,6 +1434,71 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     color: '#FFFFFF',
+  },
+  txFilterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+    gap: 8,
+  },
+  txFilterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#1E1E22',
+    borderWidth: 1,
+    borderColor: '#2C2C30',
+  },
+  txFilterPillActive: {
+    backgroundColor: '#8fc441',
+    borderColor: '#8fc441',
+  },
+  txFilterText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8E8E93',
+  },
+  txFilterTextActive: {
+    color: '#000000',
+    fontWeight: '700',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 36,
+    paddingHorizontal: 20,
+    backgroundColor: '#161618',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#26262A',
+    marginVertical: 12,
+  },
+  emptyIconCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(143, 196, 65, 0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(143, 196, 65, 0.25)',
+  },
+  emptyTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  emptySubtext: {
+    fontSize: 12,
+    color: '#8E8E93',
+    textAlign: 'center',
+    lineHeight: 18,
+    maxWidth: 260,
   },
 });
 

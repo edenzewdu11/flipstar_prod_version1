@@ -7,8 +7,8 @@ const getApiConfig = () => {
     primaryBaseUrl,
     'https://api.uat.flipstar.et/api/v1',
     'https://api.uat.flipstar.et/api',
-    'https://flipstar.et/api',
     'https://flipstar.et/api/v1',
+    'https://flipstar.et/api',
   ].filter((url, index, list) => Boolean(url) && list.indexOf(url) === index);
 
   return {

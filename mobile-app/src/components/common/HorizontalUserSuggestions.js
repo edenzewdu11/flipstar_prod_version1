@@ -91,7 +91,7 @@ export default React.memo(function HorizontalUserSuggestions({ onUserClick, onDi
           return (
             <TouchableOpacity
               key={user.id}
-              onPress={() => onUserClick?.(user.id)}
+              onPress={() => onUserClick?.(user.id, user)}
               style={styles.suggestionCard}
               activeOpacity={0.7}
             >

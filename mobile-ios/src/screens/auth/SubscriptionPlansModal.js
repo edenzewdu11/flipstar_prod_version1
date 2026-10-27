@@ -225,22 +225,37 @@ export default function SubscriptionPlansModal({ visible, onClose, onSuccess, us
         resp = await api.initiateTelebirrUssdPush(tier.id, phoneNumber, verificationSessionId);
       } catch (ussdErr) {
         console.warn('USSD push initiate failed, trying fallback direct debit:', ussdErr);
-        try {
-          resp = await api.request('/direct-debit/one-off-subscription/', {
-            method: 'POST',
-            body: JSON.stringify({ tier_id: tier.id, payer_msisdn: phoneNumber }),
-          });
-        } catch (oneOffErr) {
-          const freq = tier.duration_type === 'daily' ? '02' : tier.duration_type === 'weekly' ? '03' : '05';
-          resp = await api.request('/direct-debit/create/', {
-            method: 'POST',
-            body: JSON.stringify({ tier_id: tier.id, payer_msisdn: phoneNumber, frequency: freq }),
-          });
+        const isPending =
+          ussdErr?.status === 409 ||
+          ussdErr?.data?.code === 'PAYMENT_PENDING' ||
+          ussdErr?.message?.includes('still being confirmed') ||
+          ussdErr?.data?.error?.includes('still being confirmed');
+
+        if (isPending) {
+          resp = {
+            success: true,
+            is_pending: true,
+            message: ussdErr?.data?.error || 'Your previous payment is still being confirmed. Please wait a moment.',
+            originator_conversation_id: ussdErr?.data?.originator_conversation_id || null,
+          };
+        } else {
+          try {
+            resp = await api.request('/direct-debit/one-off-subscription/', {
+              method: 'POST',
+              body: JSON.stringify({ tier_id: tier.id, payer_msisdn: phoneNumber }),
+            });
+          } catch (oneOffErr) {
+            const freq = tier.duration_type === 'daily' ? '02' : tier.duration_type === 'weekly' ? '03' : '05';
+            resp = await api.request('/direct-debit/create/', {
+              method: 'POST',
+              body: JSON.stringify({ tier_id: tier.id, payer_msisdn: phoneNumber, frequency: freq }),
+            });
+          }
         }
       }
 
       const transactionId = resp?.originator_conversation_id || resp?.conversation_id || resp?.mandate_id || resp?.id;
-      if (resp && (resp.success || transactionId)) {
+      if (resp && (resp.success || resp.is_pending || transactionId)) {
         mandateIdRef.current = transactionId;
         ussdOriginatorRef.current = resp?.originator_conversation_id || null;
         telebirrPhoneRef.current = phoneNumber;
@@ -330,7 +345,7 @@ export default function SubscriptionPlansModal({ visible, onClose, onSuccess, us
                   <View style={s.successIcon}>
                     <Text style={{ fontSize: 56 }}>✅</Text>
                   </View>
-                  <Text style={s.successTitle}>You are successfully subscribed!</Text>
+                  <Text style={s.successTitle}>You're Successfully Subscribed! 🎉</Text>
                   <Text style={s.successSubtitle}>
                     Your <Text style={{ color: '#fff', fontWeight: '700' }}>{pendingTier.name}</Text> plan is now active.
                   </Text>

@@ -1,7 +1,0 @@
-.env
-.env.*
-*.pyc
-__pycache__
-db.sqlite3
-fallback_db.sqlite3
-neondb

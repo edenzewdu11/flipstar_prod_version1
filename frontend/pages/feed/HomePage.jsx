@@ -1438,10 +1438,9 @@ const PostCard = memo(function PostCard({ post, index, currentUser, T, onShowPro
             ? `0 16px 48px rgba(0,0,0,0.16), 0 4px 16px rgba(0,0,0,0.10)`
             : '0 2px 16px rgba(0,0,0,0.08)',
           border: `1px solid ${isHovered ? (T?.pri || '#000') + '50' : T?.border || '#e0e0e0'}`,
-          overflow: 'hidden',
-          marginBottom: window.innerWidth > 768 ? 24 : 16,
-          // Cards occupy their natural height based on content.
-          maxWidth: 560,
+          marginBottom: window.innerWidth > 768 ? 18 : 12,
+          // Cards occupy compact height based on content
+          maxWidth: 520,
           width: '100%',
           position: 'relative',
           display: 'flex',
@@ -1638,7 +1637,7 @@ const PostCard = memo(function PostCard({ post, index, currentUser, T, onShowPro
           </div>
         )}
 
-        {/* Media — natural aspect ratio, never cropped */}
+        {/* Media — full card width, natural aspect ratio, no black space, never cropped */}
         <div
           style={{
             position: 'relative',
@@ -1656,7 +1655,13 @@ const PostCard = memo(function PostCard({ post, index, currentUser, T, onShowPro
                   poster={post.image ? mediaUrl(post.image) : undefined}
                   preload={index === 0 ? 'metadata' : 'none'}
                   loading={index === 0 ? 'eager' : 'lazy'}
-                  style={{ width: '100%', height: 'auto', display: 'block', background: '#000', pointerEvents: 'none' }}
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    display: 'block',
+                    background: '#000',
+                    pointerEvents: 'none',
+                  }}
                   playsInline
                   loop
                   onPlay={() => setVideoPlaying(true)}
@@ -1691,13 +1696,18 @@ const PostCard = memo(function PostCard({ post, index, currentUser, T, onShowPro
                 alt={post.caption || ''}
                 loading={index === 0 ? 'eager' : 'lazy'}
                 decoding="async"
-                style={{ width: '100%', height: 'auto', display: 'block', cursor: 'zoom-in' }}
+                style={{
+                  width: '100%',
+                  height: 'auto',
+                  display: 'block',
+                  cursor: 'zoom-in',
+                }}
                 onClick={handleImageClick}
                 onError={() => setImgError(true)}
               />
             )
           ) : (
-            <div style={{ width: '100%', height: 260, background: T?.cardBg || '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T?.sub || '#666', fontSize: 14 }}>No media</div>
+            <div style={{ width: '100%', height: 200, background: T?.cardBg || '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T?.sub || '#666', fontSize: 14 }}>No media</div>
           )}
 
           {/* Play button overlay - only shows when paused */}

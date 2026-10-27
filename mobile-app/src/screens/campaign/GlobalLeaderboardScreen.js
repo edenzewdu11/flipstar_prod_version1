@@ -62,7 +62,7 @@ function PodiumSection({ leaders, onUserPress }) {
         </View>
         <TouchableOpacity
           activeOpacity={0.85}
-          onPress={() => onUserPress && onUserPress(entry.user_id)}
+          onPress={() => onUserPress && onUserPress(entry.user_id, entry)}
           style={[styles.podiumAvatarWrap, { width: size, height: size, borderRadius: size / 2, borderColor: medalColor }]}
         >
           {profileImg ? (
@@ -106,7 +106,7 @@ function EntryRow({ entry, onUserPress }) {
   return (
     <TouchableOpacity
       activeOpacity={0.7}
-      onPress={() => onUserPress && onUserPress(entry.user_id)}
+      onPress={() => onUserPress && onUserPress(entry.user_id, entry)}
       style={[styles.row, rank === 1 && styles.rowFirst]}
     >
       <View style={styles.rankBox}><RankBadge rank={rank} /></View>
@@ -271,9 +271,15 @@ export default function GlobalLeaderboardScreen({ route, navigation }) {
     setSelectedDate(next);
   };
 
-  const handleUserPress = (userId) => {
-    if (userId) {
-      navigation.navigate('ProfileStack', { userId });
+  const handleUserPress = (userId, userObj) => {
+    const resolvedId = userId || userObj?.user_id || userObj?.id;
+    const resolvedUsername = userObj?.username;
+    if (resolvedId || resolvedUsername) {
+      navigation.navigate('ProfileStack', { 
+        userId: resolvedId,
+        username: resolvedUsername,
+        user: typeof userObj === 'object' ? userObj : null,
+      });
     }
   };
 

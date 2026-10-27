@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Image, FlatList,
+  View, Text, StyleSheet, TouchableOpacity, FlatList,
   ActivityIndicator, ScrollView, Dimensions, Alert, RefreshControl,
   StatusBar, Modal, TextInput, Share,
 } from 'react-native';
@@ -10,8 +10,12 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useBlock } from '../../contexts/BlockContext';
+import OptimizedImage from '../../components/common/OptimizedImage';
+import { normalizeMediaUrl, generateThumbnailUrl } from '../../utils/mediaUtils';
 import api from '../../api';
 import config from '../../config';
+import { AppAlert } from '../../components/common/AppAlert';
+import { getRewardCoinsForDay } from '../../utils/rewardUtils';
 
 const { width, height } = Dimensions.get('window');
 const GOLD = '#8fc441';
@@ -21,15 +25,9 @@ const CARD = '#1A1A1A';
 const BORDER = '#262626';
 const COLS = 3;
 
-const BASE = config.API_BASE_URL.replace('/api', '');
 const isVideoMedia = (media) => {
   if (!media || typeof media !== 'string') return false;
   return /\.(mp4|webm|ogg|mov)(?:$|\?)/i.test(media) || media.includes('/video/');
-};
-const mediaUrl = (url) => {
-  if (!url) return null;
-  if (url.startsWith('http')) return url;
-  return `${BASE}${url}`;
 };
 
 // Format phone number to start with +251
@@ -62,26 +60,34 @@ const ITEM_SIZE = Math.floor((width - (GAP * (COLS - 1)) - 32) / COLS);
 
 export default function ProfileScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
-  const { user: authUser, logout } = useAuth();
+  const { user: authUser, logout, subscriptionStatus } = useAuth();
   const { colors } = useTheme();
   const { blockUser, unblockUser, isUserBlocked } = useBlock();
-  // authUser from /profile/me/ (UserProfileSerializer):
-  //   authUser.id      = UserProfile.pk
-  //   authUser.user.id = User.pk (or authUser.id if flat login response)
-  const authProfileId = authUser?.id;
-  const authUserId    = authUser?.user?.id || authUser?.id;
-  const routeUserId   = route?.params?.userId;
+  const authUserId  = authUser?.user?.id || authUser?.id;
+  const authUsername = authUser?.user?.username || authUser?.username;
+  const routeUserId = route?.params?.userId;
+  const routeUsername = route?.params?.username || route?.params?.user?.username;
+  const routeUser = route?.params?.user;
 
-  // isOwnProfile is STATE — set definitively after profile data loads so there
-  // is zero chance of a stale/wrong value from timing or ID format differences.
-  const [isOwnProfile, setIsOwnProfile] = useState(!routeUserId); // best initial guess
+  // Determine if viewing own profile strictly
+  const isInitialOwn = Boolean(
+    (!routeUserId && !routeUsername) ||
+    (routeUserId && authUserId && String(routeUserId) === String(authUserId)) ||
+    (routeUsername && authUsername && routeUsername.toLowerCase() === authUsername.toLowerCase())
+  );
+  const [isOwnProfile, setIsOwnProfile] = useState(isInitialOwn);
 
-  // targetProfileId / targetUserId — best-effort before data loads
-  const targetProfileId = !routeUserId ? authProfileId : routeUserId;
-  const targetUserId    = !routeUserId ? authUserId    : routeUserId;
+  // Seed profile immediately
+  const [profile, setProfile] = useState(
+    isInitialOwn 
+      ? authUser 
+      : (routeUser || (routeUsername || routeUserId ? { id: routeUserId, username: routeUsername, ...routeUser } : null))
+  );
 
-  // Seed own profile immediately from cached authUser so name/username appear at once
-  const [profile, setProfile] = useState(!routeUserId ? authUser : null);
+  const targetUserId = isOwnProfile 
+    ? authUserId 
+    : (profile?.user?.id || profile?.id || routeUserId);
+
   const [posts, setPosts] = useState([]);
   const [reels, setReels] = useState([]);
   const [savedPosts, setSavedPosts] = useState([]);
@@ -102,6 +108,8 @@ export default function ProfileScreen({ navigation, route }) {
   const [showProfileZoom, setShowProfileZoom] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
   const [bioText, setBioText] = useState('');
+  const [gamificationStatus, setGamificationStatus] = useState(null);
+  const [claimingDailyBonus, setClaimingDailyBonus] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
   const [editForm, setEditForm] = useState({
     first_name: '',
@@ -134,81 +142,197 @@ export default function ProfileScreen({ navigation, route }) {
   const loadProfile = useCallback(async () => {
     try {
       setLoading(true);
-      // Use targetProfileId to determine endpoint, not isOwnProfile state
-      const isOwnProfileCheck = !routeUserId || String(targetProfileId) === String(authProfileId) || String(targetProfileId) === String(authUserId);
-      const profileEndpoint = isOwnProfileCheck ? '/profile/me/' : `/profile/by_user/${targetProfileId}/`;
+      const isOwnProfileCheck = Boolean(
+        (!routeUserId && !routeUsername) ||
+        (routeUserId && authUserId && String(routeUserId) === String(authUserId)) ||
+        (routeUsername && authUsername && routeUsername.toLowerCase() === authUsername.toLowerCase())
+      );
+      
+      setIsOwnProfile(isOwnProfileCheck);
 
-      // Fetch profile first to get the real userId reliably
-      const profileData = await api.request(profileEndpoint);
+      let profileData = null;
+      let targetId = isOwnProfileCheck ? authUserId : (routeUserId || routeUser?.id);
+      let targetName = isOwnProfileCheck ? authUsername : (routeUsername || routeUser?.username);
+
+      if (isOwnProfileCheck) {
+        try {
+          profileData = await api.request('/profile/me/');
+        } catch (err) {
+          console.warn('GET /profile/me/ error:', err?.message);
+          profileData = authUser;
+        }
+
+        api.request('/gamification/status/')
+          .then(res => { 
+            if (res) setGamificationStatus(res); 
+          })
+          .catch((error) => {
+            console.log('Error fetching gamification status:', error);
+          });
+      } else {
+        // Viewing other user's profile:
+        // Remote backend endpoints from FlipStar-App-API.postman_collection.json:
+        // 1. If we have a username, search for them to get full UserSerializer
+        if (targetName) {
+          try {
+            const searchData = await api.request(`/search/?q=${encodeURIComponent(targetName)}`);
+            const matchedUser = (searchData?.users || []).find(
+              u => (u.username && u.username.toLowerCase() === targetName.toLowerCase()) || 
+                   (targetId && String(u.id) === String(targetId))
+            );
+            if (matchedUser) {
+              profileData = matchedUser;
+              targetId = matchedUser.id || targetId;
+              targetName = matchedUser.username || targetName;
+            }
+          } catch (err) {
+            console.warn('User search in loadProfile error:', err?.message);
+          }
+        }
+
+        // 2. Fetch campaign profile detail: GET /api/v1/campaigns/profile/:user_id/
+        if (targetId) {
+          try {
+            const campData = await api.request(`/campaigns/profile/${targetId}/`);
+            if (campData?.user) {
+              profileData = { ...(profileData || {}), ...campData.user, ...(campData.campaigns ? { campaigns: campData.campaigns } : {}) };
+              if (!targetName && campData.user.username) {
+                targetName = campData.user.username;
+              }
+            }
+          } catch (err) {
+            console.warn(`GET /campaigns/profile/${targetId}/ error:`, err?.message);
+          }
+        }
+
+        // 3. If targetName became known and profileData lacks bio or photo, retry search
+        if (targetName && (!profileData || !profileData.bio || !profileData.profile_photo)) {
+          try {
+            const searchData = await api.request(`/search/?q=${encodeURIComponent(targetName)}`);
+            const matchedUser = (searchData?.users || []).find(
+              u => (u.username && u.username.toLowerCase() === targetName.toLowerCase()) || 
+                   (targetId && String(u.id) === String(targetId))
+            );
+            if (matchedUser) {
+              profileData = { ...matchedUser, ...(profileData || {}) };
+              targetId = matchedUser.id || targetId;
+            }
+          } catch (_) {}
+        }
+
+        // 4. Fallback to routeUser or minimal object if not resolved
+        if (!profileData) {
+          profileData = routeUser || { id: targetId, username: targetName };
+        }
+      }
+
       setProfile(profileData);
 
-      const nestedUserEarly = profileData.user || profileData;
-      const realUserId = nestedUserEarly.id ?? profileData.id ?? targetUserId;
+      const nestedUserEarly = profileData?.user || profileData || {};
+      const realUserId = nestedUserEarly.id ?? (isOwnProfileCheck ? authUserId : (targetId || routeUserId));
 
-      // Load profile data with error handling for each endpoint
-      const [postsData, followersData, followingData] = await Promise.allSettled([
-        api.request(`/reels/?user=${realUserId}`),
-        api.request(`/follows/?following=${realUserId}`).catch(e => {
-          console.warn('Followers API failed:', e?.message);
-          // Try alternative endpoint format
-          return api.request(`/api/follows/?following=${realUserId}`).catch(altE => {
-            console.warn('Alternative followers API failed:', altE?.message);
-            return { results: [], count: 0 };
-          });
-        }),
-        api.request(`/follows/?follower=${realUserId}`).catch(e => {
-          console.warn('Following API failed:', e?.message);
-          // Try alternative endpoint format
-          return api.request(`/api/follows/?follower=${realUserId}`).catch(altE => {
-            console.warn('Alternative following API failed:', altE?.message);
-            return { results: [], count: 0 };
-          });
-        }),
-      ]);
+      // Load reels, follow stats, and follows in parallel using available remote endpoints
+      const promises = [
+        // 0: Reels
+        realUserId 
+          ? api.request(`/reels/?user=${realUserId}`).catch(e => {
+              console.warn('Reels API failed:', e?.message);
+              return { results: [] };
+            })
+          : Promise.resolve({ results: [] }),
 
-      // Extract data from settled promises
-      const postsResult = postsData.status === 'fulfilled' ? postsData.value : { results: [] };
-      const followersResult = followersData.status === 'fulfilled' ? followersData.value : { results: [], count: 0 };
-      const followingResult = followingData.status === 'fulfilled' ? followingData.value : { results: [], count: 0 };
+        // 1: Follow stats from Postman collection /api/v1/users/:user_id/follow-stats/
+        (!isOwnProfileCheck && realUserId)
+          ? api.request(`/users/${realUserId}/follow-stats/`).catch(e => {
+              console.warn('Follow-stats API failed:', e?.message);
+              return null;
+            })
+          : Promise.resolve(null),
 
-      const postsList = Array.isArray(postsResult) ? postsResult : (postsResult.results || []);
+        // 2: Followers count fallback
+        realUserId
+          ? api.request(`/follows/?following=${realUserId}`).catch(() => ({ results: [], count: 0 }))
+          : Promise.resolve({ results: [], count: 0 }),
+
+        // 3: Following count fallback
+        realUserId
+          ? api.request(`/follows/?follower=${realUserId}`).catch(() => ({ results: [], count: 0 }))
+          : Promise.resolve({ results: [], count: 0 }),
+      ];
+
+      const [postsRes, followStatsRes, followersRes, followingRes] = await Promise.all(promises);
+
+      // Extract posts list
+      const postsList = Array.isArray(postsRes) ? postsRes : (postsRes?.results || []);
       setPosts(postsList);
-      setPostsCount(postsResult.count ?? postsList.length);
+      setPostsCount(postsRes?.count ?? postsList.length);
       setReels(postsList.filter(p => isVideoMedia(p.media)));
 
-      const followersFromProfile = nestedUserEarly.followers_count ?? null;
-      const followingFromProfile = nestedUserEarly.following_count ?? null;
-      const followersList = Array.isArray(followersResult) ? followersResult : (followersResult.results || []);
-      const followingList = Array.isArray(followingResult) ? followingResult : (followingResult.results || []);
+      // If viewing another user and posts exist, enrich profile from post.user if needed
+      if (!isOwnProfileCheck && postsList.length > 0 && postsList[0].user) {
+        const postUser = postsList[0].user;
+        setProfile(prev => ({
+          ...postUser,
+          ...(prev || {}),
+          profile_photo: prev?.profile_photo || postUser.profile_photo,
+          bio: prev?.bio || postUser.bio,
+        }));
+      }
 
-      setFollowersCount(followersFromProfile !== null ? followersFromProfile : followersList.length);
-      setFollowingCount(followingFromProfile !== null ? followingFromProfile : followingList.length);
+      // Compute followers and following counts
+      const followersList = Array.isArray(followersRes) ? followersRes : (followersRes?.results || []);
+      const followingList = Array.isArray(followingRes) ? followingRes : (followingRes?.results || []);
 
-      const profileUserId = nestedUserEarly.id ?? profileData.id;
-      const amOwner = !routeUserId
-        || String(profileUserId) === String(authUserId)
-        || String(profileUserId) === String(authProfileId)
-        || String(profileData.id) === String(authProfileId);
-      setIsOwnProfile(Boolean(amOwner));
+      const fCount = followStatsRes?.followers_count ?? nestedUserEarly.followers_count ?? null;
+      const fgCount = followStatsRes?.following_count ?? nestedUserEarly.following_count ?? null;
 
-      setIsFollowing(amOwner ? false : (nestedUserEarly.is_following || profileData.is_following || false));
-      if (!amOwner && realUserId) {
+      setFollowersCount(fCount !== null ? fCount : (followersRes?.count ?? followersList.length));
+      setFollowingCount(fgCount !== null ? fgCount : (followingRes?.count ?? followingList.length));
+
+      // Set following state
+      if (!isOwnProfileCheck) {
+        if (typeof followStatsRes?.is_following === 'boolean') {
+          setIsFollowing(followStatsRes.is_following);
+        } else if (typeof nestedUserEarly.is_following === 'boolean') {
+          setIsFollowing(nestedUserEarly.is_following);
+        } else if (typeof profileData?.is_following === 'boolean') {
+          setIsFollowing(profileData.is_following);
+        } else if (Array.isArray(followersList) && authUserId) {
+          const foundMe = followersList.some(f => String(f.follower?.id || f.follower_id || f.id) === String(authUserId));
+          setIsFollowing(foundMe);
+        }
+      } else {
+        setIsFollowing(false);
+      }
+
+      if (!isOwnProfileCheck && realUserId) {
         setIsBlocked(isUserBlocked(realUserId));
       }
-      setBioText(profileData.bio || nestedUserEarly.bio || '');
+
+      setBioText(profileData?.bio || nestedUserEarly.bio || '');
       setEditForm({
-        first_name: nestedUserEarly.first_name || profileData.first_name || '',
-        last_name: nestedUserEarly.last_name || profileData.last_name || '',
-        username: nestedUserEarly.username || profileData.username || '',
-        bio: profileData.bio || nestedUserEarly.bio || '',
-        email: nestedUserEarly.email || profileData.email || '',
+        first_name: nestedUserEarly.first_name || profileData?.first_name || '',
+        last_name: nestedUserEarly.last_name || profileData?.last_name || '',
+        username: nestedUserEarly.username || profileData?.username || '',
+        bio: profileData?.bio || nestedUserEarly.bio || '',
+        email: nestedUserEarly.email || profileData?.email || '',
       });
-    } catch (e) { console.warn('loadProfile error:', e?.message); }
-    finally { setLoading(false); setRefreshing(false); }
-  }, [routeUserId, targetProfileId, authProfileId, authUserId, targetUserId, isUserBlocked]);
+    } catch (e) { 
+      console.warn('loadProfile error:', e?.message); 
+    } finally { 
+      setLoading(false); 
+      setRefreshing(false); 
+    }
+  }, [routeUserId, routeUsername, routeUser, authUserId, authUsername, authUser, isUserBlocked]);
 
   const resetProfile = useCallback(() => {
-    setProfile(!routeUserId ? authUser : null);
+    const isOwn = Boolean(
+      (!routeUserId && !routeUsername) ||
+      (routeUserId && authUserId && String(routeUserId) === String(authUserId)) ||
+      (routeUsername && authUsername && routeUsername.toLowerCase() === authUsername.toLowerCase())
+    );
+    setIsOwnProfile(isOwn);
+    setProfile(isOwn ? authUser : (routeUser || (routeUsername || routeUserId ? { id: routeUserId, username: routeUsername, ...routeUser } : null)));
     setPosts([]);
     setReels([]);
     setSavedPosts([]);
@@ -217,11 +341,11 @@ export default function ProfileScreen({ navigation, route }) {
     setIsFollowing(false);
     setActiveTab('posts');
     loadProfile(); 
-  }, [routeUserId, authUser, loadProfile]);
+  }, [routeUserId, routeUsername, routeUser, authUserId, authUsername, authUser, loadProfile]);
 
   useEffect(() => { 
     resetProfile();
-  }, [targetProfileId, resetProfile]);
+  }, [routeUserId, routeUsername, resetProfile]);
 
   // Reload profile when screen comes back into focus (e.g. after EditProfile)
   useEffect(() => {
@@ -230,7 +354,7 @@ export default function ProfileScreen({ navigation, route }) {
       loadProfile();
     });
     return unsubscribe;
-  }, [navigation]);
+  }, [navigation, loadProfile]);
 
   useEffect(() => { 
     if (activeTab === 'reels') loadReels();
@@ -353,6 +477,70 @@ export default function ProfileScreen({ navigation, route }) {
   const onRefresh = () => {
     setRefreshing(true);
     loadProfile();
+  };
+
+  const handleClaimDailyBonus = async () => {
+    if (claimingDailyBonus) return;
+    setClaimingDailyBonus(true);
+    
+    try {
+      console.log('Claiming daily bonus...');
+      const res = await api.request('/gamification/login-bonus/', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      
+      console.log('Bonus claim response:', res);
+      
+      const currentStreak = (gamificationStatus?.login_streak?.current ?? 0) + 1;
+      const cycleDay = currentStreak === 0 ? 1 : ((currentStreak - 1) % 7) + 1;
+      const durationType = (gamificationStatus?.login_streak?.duration_type || subscriptionStatus?.subscription?.tier?.duration_type || '').toLowerCase();
+      const fallbackCoins = getRewardCoinsForDay(cycleDay, durationType, gamificationStatus?.login_streak?.rewards_schedule);
+      const earned = res.coins_earned || res.coins || (gamificationStatus?.login_streak?.next_bonus?.coins ?? fallbackCoins);
+      
+      AppAlert.alert('🎁 Bonus Claimed!', `You earned +${earned} Coins for your daily login streak!`);
+      
+      // Refresh gamification status
+      console.log('Refreshing gamification status...');
+      const updated = await api.request('/gamification/status/').catch((error) => {
+        console.log('Error refreshing status:', error);
+        return null;
+      });
+      
+      if (updated) {
+        console.log('Updated gamification status:', updated);
+        setGamificationStatus(updated);
+      } else {
+        // Fallback local update
+        setGamificationStatus(prev => prev ? {
+          ...prev,
+          login_streak: {
+            ...prev.login_streak,
+            bonus_available: false,
+            current: currentStreak,
+          }
+        } : null);
+      }
+    } catch (e) {
+      console.log('Daily bonus claim error:', e);
+      const errorMsg = e?.message || '';
+      if (errorMsg.includes('already claimed today')) {
+        AppAlert.alert('⏰ Bonus Already Claimed', 'You already claimed your login bonus today. Come back tomorrow for your next bonus!');
+        setGamificationStatus(prev => prev ? {
+          ...prev,
+          login_streak: {
+            ...prev.login_streak,
+            bonus_available: false,
+          }
+        } : null);
+      } else {
+        AppAlert.alert('Error', e?.message || 'Could not claim daily bonus.');
+      }
+    } finally {
+      setClaimingDailyBonus(false);
+    }
   };
 
   const toggleFollow = async () => {
@@ -752,7 +940,12 @@ export default function ProfileScreen({ navigation, route }) {
           onLongPress={() => isOwnProfile && setPostMenuId(item.id)}
         >
           {thumbnail ? (
-            <Image source={{ uri: mediaUrl(thumbnail) }} style={styles.gridImage} resizeMode="cover" />
+            <OptimizedImage 
+              source={{ uri: normalizeMediaUrl(thumbnail) }} 
+              style={styles.gridImage} 
+              contentFit="cover" 
+              cloudinaryOptions={{ width: 300, height: 300 }}
+            />
           ) : (
             <View style={[styles.gridImage, styles.fallbackContainer]}>
               <Ionicons name={isVideo ? 'play' : 'image'} size={28} color={colors.textSecondary} />
@@ -846,7 +1039,10 @@ export default function ProfileScreen({ navigation, route }) {
               <Ionicons name="ribbon" size={24} color={colors.primary} />
             </TouchableOpacity>
             <TouchableOpacity onPress={() => navigation.navigate('Gamification')} style={styles.headerButton}>
-              <Ionicons name="game-controller-outline" size={24} color={colors.primary} />
+              <Ionicons name="gift-outline" size={24} color={colors.primary} />
+              {isOwnProfile && gamificationStatus?.login_streak?.bonus_available && (
+                <View style={styles.bonusBadgeDot} />
+              )}
             </TouchableOpacity>
             <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={styles.headerButton}>
               <Ionicons name="settings-outline" size={24} color={colors.primary} />
@@ -868,11 +1064,13 @@ export default function ProfileScreen({ navigation, route }) {
         <View style={[styles.profileHeader, { backgroundColor: colors.cardBg }]}>
           <View style={styles.profileInfo}>
             <View style={styles.avatarContainer}>
-              {profile?.profile_photo ? (
+              {(profile?.profile_photo || profile?.avatar || profile?.user?.profile_photo) ? (
                 <TouchableOpacity onPress={() => setShowProfileZoom(true)}>
-                  <Image 
-                    source={{ uri: mediaUrl(profile.profile_photo) }} 
+                  <OptimizedImage 
+                    source={{ uri: normalizeMediaUrl(profile.profile_photo || profile.avatar || profile.user?.profile_photo) }} 
                     style={styles.avatar}
+                    contentFit="cover"
+                    cloudinaryOptions={{ width: 200, height: 200 }}
                   />
                 </TouchableOpacity>
               ) : (
@@ -906,9 +1104,9 @@ export default function ProfileScreen({ navigation, route }) {
           
           <View style={styles.profileDetails}>
             <Text style={[styles.profileName, { color: colors.text }]}>
-              {(profile?.user?.first_name || profile?.first_name)} {(profile?.user?.last_name || profile?.last_name)}
+              {((profile?.user?.first_name || profile?.first_name || '') + ' ' + (profile?.user?.last_name || profile?.last_name || '')).trim() || (profile?.user?.username || profile?.username || 'User')}
             </Text>
-            <Text style={[styles.profileUsername, { color: '#fff' }]}>@{profile?.username || profile?.user?.username}</Text>
+            <Text style={[styles.profileUsername, { color: '#fff' }]}>@{profile?.username || profile?.user?.username || ''}</Text>
             
             {/* Phone Number - Only show in own profile */}
             {isOwnProfile && (
@@ -961,6 +1159,8 @@ export default function ProfileScreen({ navigation, route }) {
             )}
           </View>
           
+          {/* Daily Bonus & Streak Card - REMOVED (use Gamification screen instead) */}
+
           {/* Edit Profile Button for Own Profile */}
           {isOwnProfile && (
             <TouchableOpacity 
@@ -1117,10 +1317,10 @@ export default function ProfileScreen({ navigation, route }) {
           onPress={() => setShowProfileZoom(false)}
         >
           {profile?.profile_photo && (
-            <Image 
-              source={{ uri: mediaUrl(profile.profile_photo) }} 
+            <OptimizedImage 
+              source={{ uri: normalizeMediaUrl(profile.profile_photo) }} 
               style={styles.zoomedImage}
-              resizeMode="contain"
+              contentFit="contain"
             />
           )}
         </TouchableOpacity>
@@ -1383,10 +1583,11 @@ export default function ProfileScreen({ navigation, route }) {
                 <View style={styles.editMediaPreview}>
                   {editingPost.thumbnail ? (
                     <View style={styles.videoPreviewContainer}>
-                      <Image 
-                        source={{ uri: mediaUrl(editingPost.thumbnail) }} 
+                      <OptimizedImage 
+                        source={{ uri: normalizeMediaUrl(editingPost.thumbnail) }} 
                         style={styles.editMediaImage}
-                        resizeMode="cover"
+                        contentFit="cover"
+                        cloudinaryOptions={{ width: 400, height: 300 }}
                       />
                       {editingPost.media && (
                         <View style={styles.videoOverlay}>
@@ -1396,20 +1597,22 @@ export default function ProfileScreen({ navigation, route }) {
                     </View>
                   ) : editingPost.media ? (
                     <View style={styles.videoPreviewContainer}>
-                      <Image 
-                        source={{ uri: mediaUrl(editingPost.image) }} 
+                      <OptimizedImage 
+                        source={{ uri: normalizeMediaUrl(editingPost.image) }} 
                         style={styles.editMediaImage}
-                        resizeMode="cover"
+                        contentFit="cover"
+                        cloudinaryOptions={{ width: 400, height: 300 }}
                       />
                       <View style={styles.videoOverlay}>
                         <Ionicons name="play-circle" size={64} color="rgba(255,255,255,0.9)" />
                       </View>
                     </View>
                   ) : (
-                    <Image 
-                      source={{ uri: mediaUrl(editingPost.image) }} 
+                    <OptimizedImage 
+                      source={{ uri: normalizeMediaUrl(editingPost.image) }} 
                       style={styles.editMediaImage}
-                      resizeMode="cover"
+                      contentFit="cover"
+                      cloudinaryOptions={{ width: 400, height: 300 }}
                     />
                   )}
                 </View>
@@ -2424,5 +2627,145 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#fff',
     fontWeight: '600',
+  },
+  // Daily Bonus Card
+  dailyBonusCard: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dailyBonusContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 10,
+  },
+  dailyBonusIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  dailyBonusFireEmoji: {
+    fontSize: 20,
+  },
+  dailyBonusInfo: {
+    flex: 1,
+  },
+  dailyBonusTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  dailyBonusTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  streakPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  streakPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  dailyBonusSubtitle: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  weeklyProgressContainer: {
+    marginTop: 8,
+  },
+  weeklyProgressLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  weeklyProgressDots: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dayDotContainer: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  dayDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1,
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  dayDotClaimed: {
+    backgroundColor: '#8fc441',
+    borderColor: '#8fc441',
+  },
+  dayDotToday: {
+    backgroundColor: '#ffa500',
+    borderColor: '#ffa500',
+  },
+  dayDotText: {
+    fontSize: 8,
+    fontWeight: '600',
+  },
+  coinLabel: {
+    fontSize: 8,
+    fontWeight: '500',
+  },
+  dailyBonusActionWrap: {
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+  },
+  claimBonusBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    shadowColor: '#8fc441',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  claimBonusBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#000',
+  },
+  claimedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  claimedBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  bonusBadgeDot: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#8fc441',
   },
 });
